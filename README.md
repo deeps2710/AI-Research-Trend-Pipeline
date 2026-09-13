@@ -3,11 +3,12 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 2 — Reliable OpenAlex Extraction
+## Current status: Stage 3 — dlt + DuckDB ingestion
 
-Stage 2 adds bounded cursor pagination, transient-error retries, streamed raw
-JSONL files, and provenance sidecars. Only `requests` and `python-dotenv` are
-required; all other functionality uses Python's standard library.
+The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
+bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
+Stage 3 loads those local files into a persistent warehouse using
+`dlt[duckdb]`, alongside the existing `requests` and `python-dotenv` dependencies.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -15,9 +16,9 @@ total matching count and up to 10 works with their title, year, citation
 count, type, and primary topic. Missing optional fields display as Unknown.
 This Stage 1 exploration command still prints results without saving data.
 
-dlt, DuckDB, Pandas transformations, analytics, Matplotlib, Streamlit, ML,
-embeddings, and dashboards are planned for later stages and intentionally
-not implemented yet.
+Analytical transformations, curated warehouse modeling, Pandas, Matplotlib,
+Streamlit, ML, embeddings, and dashboards belong to later stages and are
+not implemented.
 
 ## Setup and run
 
@@ -67,15 +68,21 @@ src/
   extract/
     __init__.py
     openalex_client.py    # Session-based Works API client
+  load/
+    __init__.py
+    openalex_dlt.py       # Streaming JSONL resource and DuckDB pipeline
 scripts/
   __init__.py
   explore_openalex.py     # Terminal exploration entry point
   extract_openalex.py     # Bounded raw extraction CLI
+  load_openalex.py        # Load existing JSONL, without OpenAlex requests
+  inspect_warehouse.py    # Read-only table/count/sample inspection
 tests/                   # Offline standard-library unit tests
 data/raw/openalex/        # Generated JSONL and provenance; Git-ignored
+data/warehouse/           # DuckDB file and local dlt state; Git-ignored
 .env.example             # API key placeholder
 .gitignore               # Secrets, caches, and local data exclusions
-requirements.txt         # requests and python-dotenv only
+requirements.txt         # requests, python-dotenv, dlt[duckdb]
 ```
 
 `OpenAlexClient.fetch_works()` accepts a keyword slug (default
@@ -137,18 +144,114 @@ not resumed automatically. The two renames are not a single atomic operation.
 
 Raw files, sidecars, and interrupted files are intentionally Git-ignored,
 including JSONL/sidecars written to custom output directories. No raw data or
-API credentials belong in commits. dlt, DuckDB, transformations, analytics,
-and Streamlit remain later-stage work.
+API credentials belong in commits.
+
+## Load into DuckDB
+
+Install the updated dependencies in the active virtual environment:
+
+```bash
+python -m pip install -r requirements.txt
+python -m scripts.load_openalex
+python -m scripts.inspect_warehouse
+```
+
+The loader prints the selected file. By default it finds the newest `.jsonl`
+by modification time in `data/raw/openalex`, requiring a matching final
+`.metadata.json` sidecar so interrupted Stage 2 runs are excluded. It fails
+if none exists. To choose a particular extraction:
+
+```bash
+python -m scripts.load_openalex --input-file data/raw/openalex/YOUR_EXTRACTION.jsonl
+```
+
+Replace `YOUR_EXTRACTION.jsonl` with the actual filename printed by Stage 2.
+An explicitly chosen JSONL does not require a sidecar. Metadata JSON and
+`.inprogress` files are never accepted as Works input. The loader reads UTF-8
+one record at a time, skips blank lines, and reports filename/line number for
+malformed JSON, non-object records, and missing or empty Work IDs. It does
+not call OpenAlex, load `.env`, or require an API key.
+
+The pipeline is `openalex_pipeline`, the dataset/schema is `openalex_data`,
+and the root resource/table is `works`. The default persistent database is
+`data/warehouse/research_trends.duckdb`; the schema name differs from the
+database catalog name to avoid ambiguous SQL references. Both CLIs accept
+`--database`:
+
+```bash
+python -m scripts.load_openalex --input-file data/raw/openalex/YOUR_EXTRACTION.jsonl --database data/warehouse/test.duckdb
+python -m scripts.inspect_warehouse --database data/warehouse/test.duckdb
+```
+
+[dlt](https://dlthub.com/docs/general-usage/destination-tables) infers columns
+and types, normalizes nested objects/lists, and manages loading. Nested lists
+create child tables; their names depend on the input, so the inspector
+discovers tables rather than assuming a fixed schema. DuckDB stores the
+result in a local file that persists after Python exits. No SQL tables are
+manually created, and no analytical transformations are performed.
+
+The resource uses `primary_key="id"` and `write_disposition="merge"` from the
+first load. The OpenAlex Work ID identifies the same paper across extractions.
+Loading the same file twice therefore leaves one root row per ID instead of
+doubling the rows: this is idempotency here. Loading newer metadata for the
+same ID updates fields such as citation counts. Replaying an older extraction
+can overwrite newer metadata; no freshness ordering is implemented yet.
+Root-key propagation is explicitly enabled on the source so dlt can replace
+nested descendants belonging to updated Works. See [dlt merge loading](https://dlthub.com/docs/general-usage/merge-loading).
+
+`_dlt_loads`, `_dlt_pipeline_state`, and `_dlt_version` support load, state, and
+schema tracking and must be retained. Repeat loads can add tracking records
+even when the Works count stays unchanged. dlt may also maintain a staging
+schema. The inspector lists schemas, discovered dataset tables, internal
+tables, root count, and up to five Works using available sample columns.
+
+Local dlt working state is stored beside the database under
+`.dlt_pipelines/<database-filename>/`, keeping overridden databases separate.
+That state, raw data, warehouse files, and credentials are Git-ignored.
+Load failures return a nonzero exit code; keep dlt state for diagnosis/retry
+and do not treat a failed run as a successful warehouse refresh. Close other
+processes holding the database if a file-lock error occurs.
+
+Stage 3 validation used the existing five-record Stage 2 extraction. Two
+separate CLI loads both left **5 Works / 5 distinct IDs**. With dlt 1.30.0 and
+DuckDB 1.5.5, this input generated the following dataset tables:
+
+```text
+works
+works__topics
+works__keywords
+works__authorships
+works__authorships__affiliations
+works__authorships__affiliations__institution_ids
+works__authorships__countries
+works__authorships__institutions
+works__authorships__institutions__lineage
+works__authorships__raw_affiliation_strings
+works__primary_location__source__host_organization_lineage
+works__primary_location__source__host_organization_lineage_names
+works__primary_location__source__issn
+_dlt_loads
+_dlt_pipeline_state
+_dlt_version
+```
+
+This is an observed inventory, not a fixed schema contract. dlt warned that
+`primary_location__pdf_url` and `primary_location__source` had no values from
+which to infer a type. Such fields can remain unmaterialized until typed
+values arrive; this did not fail the load. Nested source properties that had
+values were still normalized.
 
 ## Local checks
 
 ```bash
 python -m compileall -q src scripts tests
 python -m unittest discover -s tests -v
-git check-ignore .env data/raw/openalex/example.jsonl
+git check-ignore .env data/raw/openalex/example.jsonl data/warehouse/research_trends.duckdb
 git status --short
 ```
 
-Tests run offline with mocked HTTP responses. A successful test suite does
-not prove live API availability. The exploration command requires network
-access and reports a safe error if the API cannot be reached.
+Tests use mocked HTTP responses and real temporary DuckDB databases. They
+check repeat-load root/child counts, updated citations, removal of obsolete
+nested records, input validation, and warehouse inspection. They do not call
+OpenAlex. Stage 1 exploration and Stage 2 extraction still require network
+access; Stage 3 reads local files only.

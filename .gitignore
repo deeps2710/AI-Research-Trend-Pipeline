@@ -16,3 +16,6 @@ data/raw/
 *.metadata.json
 *.inprogress
 data/processed/
+data/warehouse/
+**/.dlt_pipelines/
+.dlt/secrets.toml
