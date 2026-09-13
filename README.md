@@ -3,12 +3,14 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 3 — dlt + DuckDB ingestion
+## Current status: Stage 4 — curated warehouse and SQL transformations
 
 The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
 bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
 Stage 3 loads those local files into a persistent warehouse using
 `dlt[duckdb]`, alongside the existing `requests` and `python-dotenv` dependencies.
+Stage 4 rebuilds a separate `curated` schema from those ingestion tables using
+DuckDB SQL. No additional dependencies are needed.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -16,9 +18,8 @@ total matching count and up to 10 works with their title, year, citation
 count, type, and primary topic. Missing optional fields display as Unknown.
 This Stage 1 exploration command still prints results without saving data.
 
-Analytical transformations, curated warehouse modeling, Pandas, Matplotlib,
-Streamlit, ML, embeddings, and dashboards belong to later stages and are
-not implemented.
+Stage 5 analytics, Pandas, Matplotlib, Streamlit, ML, embeddings, recommendations,
+and dashboards are not implemented.
 
 ## Setup and run
 
@@ -71,12 +72,18 @@ src/
   load/
     __init__.py
     openalex_dlt.py       # Streaming JSONL resource and DuckDB pipeline
+  transform/
+    __init__.py
+    curated.py            # Schema compatibility, SQL orchestration, quality checks
 scripts/
   __init__.py
   explore_openalex.py     # Terminal exploration entry point
   extract_openalex.py     # Bounded raw extraction CLI
   load_openalex.py        # Load existing JSONL, without OpenAlex requests
   inspect_warehouse.py    # Read-only table/count/sample inspection
+  build_curated.py        # Transactional curated rebuild
+  inspect_curated.py      # Small samples from the seven curated tables
+sql/curated/              # Ordered SQL transformations, 01 through 07
 tests/                   # Offline standard-library unit tests
 data/raw/openalex/        # Generated JSONL and provenance; Git-ignored
 data/warehouse/           # DuckDB file and local dlt state; Git-ignored
@@ -255,3 +262,86 @@ check repeat-load root/child counts, updated citations, removal of obsolete
 nested records, input validation, and warehouse inspection. They do not call
 OpenAlex. Stage 1 exploration and Stage 2 extraction still require network
 access; Stage 3 reads local files only.
+
+
+## Curated model (Stage 4)
+
+The flow is raw JSONL → dlt-normalized `openalex_data` → SQL → `curated`.
+`openalex_data` and its `_dlt_` tables remain owned by dlt. Stage 4 never
+changes those tables. The new schema is a current snapshot, rebuilt after
+new Stage 3 loads; it is not refreshed automatically.
+
+```bash
+python -m scripts.build_curated
+python -m scripts.inspect_curated
+```
+
+Both commands accept `--database data/warehouse/research_trends.duckdb`.
+They operate locally without an API key. Run all module commands from the
+repository root. SQL files are located relative to the Python module.
+
+| Curated table | Grain / business key | Validated local rows |
+| --- | --- | ---: |
+| `papers` | One Work / `paper_id` | 250 |
+| `topics` | One Topic / `topic_id` | 300 |
+| `paper_topics` | One `(paper_id, topic_id)` pair | 719 |
+| `authors` | One Author / `author_id` | 1582 |
+| `paper_authors` | One `(paper_id, author_id)` pair | 1614 |
+| `institutions` | One Institution / `institution_id` | 804 |
+| `paper_institutions` | One `(paper_id, institution_id)` pair | 1004 |
+
+These counts describe the local warehouse used for validation, not fixed
+expectations for other extractions. Actual source tables were inspected with
+DuckDB metadata and DESCRIBE before writing the transformations:
+`works`, `works__topics`, `works__authorships`, and
+`works__authorships__institutions`, all in `openalex_data`.
+
+OpenAlex IDs are the public business keys. Internal joins use topic and
+authorship `_dlt_parent_id` to Work `_dlt_id`; institutions join through their
+parent authorship before reaching the Work. Those technical lineage keys
+are excluded from curated outputs. Missing/blank entity IDs are not invented:
+those entities are omitted while their identified paper remains.
+
+Papers preserve available DOI, title, year, date, type, citations, open-access
+status, primary topic, and primary source ID/name. Dates retain the source
+representation. Topics include the available subfield/field/domain hierarchy.
+Author bridges retain available position and corresponding-author attributes.
+Institution bridges deduplicate affiliations shared by multiple authors on
+the same paper. The observed warehouse supports all requested optional
+paper/topic/author/institution attributes; null values remain null. Separate
+source and keyword dimensions are outside this required seven-table model.
+
+Python inspects materialized source columns and substitutes only available
+projections into the SQL templates. An absent optional column is omitted,
+not filled with fabricated values. Absent nested tables yield empty key-only
+curated dimensions/bridges. Nested tables without entity IDs still retain
+lineage internally, allowing identified institutions to survive an unknown
+author. A missing root table or required lineage column is incompatible.
+
+Dimension labels use a deterministic representative from the earliest
+lexicographic Work ID, with lineage/row content as tie breakers; no claim is
+made that this is the newest label. Duplicate authorship pairs use the lowest
+technical authorship ID's attributes. Duplicate topic pairs retain the maximum
+score. Primary-topic flags compare the relationship's topic ID with the Work's
+primary topic ID; unknown primary topics produce null flags.
+
+The bridges represent separate many-to-many relationships. Combining authors,
+topics, and institutions into one flat table would multiply rows: two authors
+and three topics can produce six rows for one paper. Summing citations over
+that join would overcount. Citation counts remain at paper grain; Stage 5 must
+choose the relationship grain deliberately when it adds analytics.
+
+SQL runs in filename order using `CREATE OR REPLACE TABLE` inside one transaction.
+Checks reject null/blank or duplicate business keys, duplicate bridge pairs,
+broken bridge references, and orphan source lineage. Non-null publication years
+must be between 1500 and the current UTC year plus one; this project policy
+allows forthcoming works but rejects obviously invalid years. Historical
+collections before 1500 require an explicit policy adjustment. Null years are
+allowed. A failed build rolls back, preserving the previous curated snapshot.
+Running twice against unchanged ingestion data leaves counts unchanged.
+
+Tests use small local DuckDB fixtures and cover repeat builds, missing nested
+structures, key uniqueness, references, invalid years, and rollback. No API
+extraction is needed. The inspector prints counts and at most three rows per
+table. Raw files and the shared DuckDB warehouse remain Git-ignored. Stage 5
+will use this layer for research-trend analytics; none is implemented here.
