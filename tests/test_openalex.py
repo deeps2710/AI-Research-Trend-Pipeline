@@ -21,6 +21,7 @@ class OpenAlexTests(unittest.TestCase):
 
     def test_request_filters_fields_and_status_before_json(self):
         response = Mock()
+        response.headers = {}
         response.json.return_value = {"meta": {"count": 1}, "results": []}
         with patch.object(self.client.session, "get", return_value=response) as get:
             result = self.client.fetch_works(publication_year=2025)
@@ -40,6 +41,7 @@ class OpenAlexTests(unittest.TestCase):
     def test_optional_key_and_keyword_without_year(self):
         self.client._api_key = "unit-test-placeholder"
         with patch.object(self.client.session, "get") as get:
+            get.return_value.headers = {}
             self.client.fetch_works(keyword_slug="deep-learning", per_page=100)
         params = get.call_args.kwargs["params"]
         self.assertEqual(params["api_key"], "unit-test-placeholder")
@@ -54,6 +56,7 @@ class OpenAlexTests(unittest.TestCase):
 
     def test_http_failure_does_not_parse_json(self):
         response = Mock()
+        response.headers = {}
         response.raise_for_status.side_effect = requests.HTTPError()
         with patch.object(self.client.session, "get", return_value=response):
             with self.assertRaises(requests.HTTPError):
