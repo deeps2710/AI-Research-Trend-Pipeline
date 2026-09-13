@@ -3,7 +3,7 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 4 — curated warehouse and SQL transformations
+## Current status: Stage 5 — analytical SQL and KPIs
 
 The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
 bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
@@ -11,6 +11,7 @@ Stage 3 loads those local files into a persistent warehouse using
 `dlt[duckdb]`, alongside the existing `requests` and `python-dotenv` dependencies.
 Stage 4 rebuilds a separate `curated` schema from those ingestion tables using
 DuckDB SQL. No additional dependencies are needed.
+Stage 5 adds reusable SQL views in `analytics`, derived only from `curated`.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -18,8 +19,8 @@ total matching count and up to 10 works with their title, year, citation
 count, type, and primary topic. Missing optional fields display as Unknown.
 This Stage 1 exploration command still prints results without saving data.
 
-Stage 5 analytics, Pandas, Matplotlib, Streamlit, ML, embeddings, recommendations,
-and dashboards are not implemented.
+Stage 6 visualization, Pandas, Matplotlib, Streamlit, ML, embeddings,
+recommendations, and dashboards are not implemented.
 
 ## Setup and run
 
@@ -75,6 +76,7 @@ src/
   transform/
     __init__.py
     curated.py            # Schema compatibility, SQL orchestration, quality checks
+    analytics.py          # Analytical view build and KPI validation
 scripts/
   __init__.py
   explore_openalex.py     # Terminal exploration entry point
@@ -83,7 +85,10 @@ scripts/
   inspect_warehouse.py    # Read-only table/count/sample inspection
   build_curated.py        # Transactional curated rebuild
   inspect_curated.py      # Small samples from the seven curated tables
+  build_analytics.py      # Build eight analytical views and validate KPIs
+  inspect_analytics.py    # Up to five ordered rows per available view
 sql/curated/              # Ordered SQL transformations, 01 through 07
+sql/analytics/            # Analytical SQL, 01 through 08
 tests/                   # Offline standard-library unit tests
 data/raw/openalex/        # Generated JSONL and provenance; Git-ignored
 data/warehouse/           # DuckDB file and local dlt state; Git-ignored
@@ -344,4 +349,99 @@ Tests use small local DuckDB fixtures and cover repeat builds, missing nested
 structures, key uniqueness, references, invalid years, and rollback. No API
 extraction is needed. The inspector prints counts and at most three rows per
 table. Raw files and the shared DuckDB warehouse remain Git-ignored. Stage 5
-will use this layer for research-trend analytics; none is implemented here.
+uses this layer for the analytical views described below.
+
+## Analytical SQL and KPIs (Stage 5)
+
+`openalex_data` retains ingestion and dlt state; `curated` retains entity and
+relationship grains; `analytics` provides derived query results. Stage 5
+creates views, not a second copy of the curated model. It adds no dependencies
+and makes no OpenAlex requests.
+
+```bash
+python -m scripts.build_analytics
+python -m scripts.inspect_analytics
+```
+
+Both accept `--database data/warehouse/research_trends.duckdb`. Avoid database
+filenames `analytics.duckdb` and `curated.duckdb`, which conflict with schema
+names in DuckDB. Build Stage 4 first. After reloading Stage 3, rebuild Stage 4
+to refresh its snapshot, then rebuild Stage 5 to revalidate the views.
+
+| View in `analytics` | Grain and purpose |
+| --- | --- |
+| `overview_kpis` | One row: papers, citations, mean/median citations, OA count/share, unique entities, year range |
+| `publication_trends` | One observed non-null publication year: paper/citation totals and growth |
+| `topic_summary` | One linked topic: distinct papers, citations, mean/median citations, OA share |
+| `topic_yearly_trends` | One linked topic and observed year: paper/citation totals and growth |
+| `top_papers` | Every paper, with citation rank and available descriptive fields |
+| `author_summary` | One linked author: distinct authored papers, citations, average and OA measures |
+| `institution_summary` | One linked institution: distinct affiliated papers and citation measures |
+| `open_access_summary` | One OA status, including `unknown`: papers and share of all papers |
+
+The builder validates all seven Stage 4 key structures before running the
+ordered SQL files. Simple `-- if` blocks include optional metrics only when
+their underlying columns exist. Missing year or OA-status columns omit the
+corresponding whole views; other missing fields omit only their metrics.
+The current warehouse supports all eight views and all requested KPIs.
+No unavailable-source metrics were filled with invented values.
+
+Views use [CREATE OR REPLACE VIEW](https://duckdb.org/docs/current/sql/statements/create_view)
+inside a transaction. They query current curated rows when read. Failure
+rolls back definition changes; repeated builds do not append data. Optional
+view definitions are removed if their required fields disappear. After a
+curated schema change, rebuild analytics before querying it. Unchanged data,
+schema, and reference year produce unchanged results.
+
+Yearly views exclude null publication years; their paper counts therefore
+reconcile to papers with known years, not necessarily the overview total.
+`LAG` finds the previous observed year/count (partitioned by topic for topic
+trends). A prior count is exposed only when that year is the immediately
+preceding calendar year. Growth is `100 * (current - previous) / previous`,
+with `NULLIF(previous, 0)` protecting division. The first year, missing-year
+gaps, or zero denominators yield null growth. Missing years are not invented
+as zero-volume observations. No fastest-growing topic ranking is created.
+
+Citation sums use available citation values; averages and medians exclude
+null citation counts. Empty/all-null citation groups return null aggregates,
+not fabricated zero citations. Confirmed-open-access percentages divide the
+number of `is_open_access=true` papers by **all** papers in that group, including
+unknown flags in the denominator. They measure confirmed OA coverage, not
+the closed share. Missing/blank OA status is grouped as `unknown`, never
+inferred to be closed. Empty-group percentages are null.
+
+Each domain independently joins one distinct bridge to papers. There is no
+paper × topic × author × institution intermediate table. Citation totals use
+full counting: a paper's full citations are attributed to each associated
+topic, author, and institution rather than divided among them. Thus domain
+totals must not be summed across entities to estimate unique corpus citations.
+Unlinked dimension entities remain in overview unique-entity counts but do
+not appear in relationship-based summaries.
+
+Top papers use `ROW_NUMBER` ordered by citations descending, nulls last, then
+paper ID ascending for deterministic ties. The view has no permanent top-N
+limit. Consumers must explicitly order by `citation_rank` and choose a limit.
+
+Raw citations favor older papers. `citations_per_year_since_publication` is
+a **project-derived heuristic**, not an official OpenAlex metric or bibliometric
+standard: `cited_by_count / max(1, reference_year - publication_year + 1)`.
+`citation_reference_year` is the current database-session calendar year at
+query time. Null/future publication years yield null, and missing citation
+counts remain null. This calendar-year approximation does not account for
+exact publication dates or field differences; with only one publication year
+it provides no additional ranking distinction over raw citations.
+
+Validation checks reconcile overview and yearly counts, OA category counts,
+and distinct paper counts per topic/author/institution. They reject negative
+counts, shares outside 0–100, non-finite division results, invalid ranking,
+and broken curated keys/references. Growth percentages can legitimately be
+negative or above 100; only finiteness is required for those percentages.
+Fixture tests cover consecutive years, gaps, unknown years/OA, tied citations,
+empty input, missing optional fields, full counting, and repeat builds.
+
+The inspected local snapshot contains **250 papers**, all from **2025**, with
+**53,488 citations**, mean **213.952**, median **87.5**, and **192 confirmed OA
+papers (76.8%)**. It has **1,582 authors**, **300 topics**, and **804 institutions**.
+These describe this bounded extraction, not the global OpenAlex corpus.
+Year-over-year growth is unavailable because only one year is present.
+Stage 6 will visualize these analytical views; no visualization is included here.
