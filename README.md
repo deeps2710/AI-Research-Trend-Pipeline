@@ -3,7 +3,7 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 8 — incremental pipeline orchestration
+## Current status: Stage 9 — data quality and pipeline observability
 
 The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
 bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
@@ -15,6 +15,7 @@ Stage 5 adds reusable SQL views in `analytics`, derived only from `curated`.
 Stage 6 reads those views into Pandas and saves static Matplotlib charts.
 Stage 7 adds a read-only Streamlit dashboard over the same warehouse.
 Stage 8 coordinates local incremental raw-file processing and downstream builds.
+Stage 9 adds persisted quality checks, blocking integrity gates, logs, and health reporting.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -628,8 +629,8 @@ inside the repository are stored relative to it; external paths are absolute.
 The loader reads a private temporary snapshot, validated with the Stage 3 JSONL
 reader, so the recorded fingerprint describes exactly the loaded bytes. Files
 modified after snapshotting are detected again next run. Renaming a file makes
-it eligible again. Empty completed files are recorded with zero records and
-do not alone trigger a rebuild. Missing/empty raw directories are a successful
+it eligible again. Stage 9 rejects empty completed files at the raw quality gate.
+Missing/empty raw directories are a successful
 no-op; use the status command to check the configured location.
 
 Operational state lives in the same DuckDB database:
@@ -686,4 +687,100 @@ Tests use temporary raw directories and databases to verify fingerprints,
 skip/force/change behavior, real merge stability, downstream repeatability,
 malformed-input handling, fail-fast execution, retry recovery, lock release,
 and run-state inspection. Core validation makes no OpenAlex requests. No
-scheduled execution, deployment, or Stage 9 functionality is included.
+scheduled execution or deployment is included.
+
+## Stage 9: data quality, logging and health
+
+```powershell
+python -m scripts.check_data_quality
+python -m scripts.check_data_quality --database data/warehouse/research_trends.duckdb
+python -m scripts.run_pipeline --rebuild-downstream --skip-visualizations
+python -m scripts.pipeline_status
+python -m unittest discover -s tests -v
+```
+
+Quality is a separate assessment of the data: pipeline success means the
+requested processing finished, while a successful run can still have quality
+warnings. No heavy quality framework or new dependency is added. The existing
+unittest suite remains in use.
+
+- **PASS:** the check's stated condition holds.
+- **WARN:** optional source sparsity or insufficient temporal coverage; processing
+  continues and the CLI exits zero if no FAIL exists.
+- **FAIL:** malformed input, inconsistent extraction metadata, missing required
+  schema, broken identity/references, or invalid analytical metrics. The quality
+  CLI exits nonzero and orchestrated gates stop dependent work.
+
+Raw quality reuses the Stage 3 streaming reader. Every Work must have a nonblank
+string `id`; JSON must be valid and a completed file must contain records.
+Available legacy/new metadata record counts must match the file; source/cap
+counts must be nonnegative integers at least as large as extracted volume.
+`is_complete_extraction=true` requires a known matching source count. Missing
+optional provenance fields remain compatible. Raw checks run for files selected
+for ingestion, including force runs, and their results are saved before loading.
+The standalone quality CLI checks the current curated/analytics warehouse.
+
+The seven curated tables require their business-key columns. Paper/entity keys
+and bridge pairs must be nonblank and unique, and every bridge endpoint must
+resolve. Citations must be finite and nonnegative when present; publication years
+must fall within the existing 1500–current-year-plus-one scholarly range.
+The transactional curated builder shares these exact checks with the quality
+runner. Builder failures preserve the previously committed tables, and their
+quality results are persisted after rollback by the orchestrator.
+
+DOI, title, primary topic, authors, institutions, OA and source information remain
+optional. Coverage reports DOI, title, identified primary topic, identified
+authors, institution affiliations and known OA information as percentages of
+curated papers. Zero/partial coverage produces WARN, not FAIL; 100% produces
+PASS. This is an informational completeness comparison, not a minimum acceptance
+threshold. An empty dataset has unavailable percentages. Unknown/closed OA are
+not interchangeable: explicit closed/false is known information. Fewer than two
+distinct known publication years yields WARN, with no growth claim.
+
+Analytics checks query the expected views (allowing schema-dependent optional
+views to be absent), verify a single overview row, and reject negative/nonfinite
+citation metrics and duplicate analytical entity rows. They reuse Stage 5's
+validator for overview/curated count reconciliation, yearly counts, percentage
+bounds, per-topic/author/institution distinct-paper grain, and deterministic
+ranking. Growth percentages are intentionally exempt from the 0–100 share range.
+
+The orchestrated order is raw quality → ingestion → curated → curated quality
+gate → analytics → analytics quality gate → optional visualizations. Severe
+builder/gate failures are persisted and stop downstream stages; coverage warnings
+continue. Dirty flags remain set so a corrected run can resume. Unchanged,
+fully completed runs remain no-ops; use the standalone checker or
+`--rebuild-downstream` to reassess a warehouse changed outside the orchestrator.
+Charts and dashboard rendering are not upstream quality gates.
+
+`ops.data_quality_results` stores an execution UUID, optional pipeline run UUID,
+check name/layer/status, aggregate observed value, expected condition, safe
+details and timestamp. Each check batch is inserted transactionally; history is
+retained without storing raw records or API credentials. Standalone checking
+writes only this ops history, so close other warehouse users first. It does not
+create a missing warehouse. No freshness/history is invented for older datasets.
+
+The pipeline and quality CLIs configure Python logging with timestamped console
+output plus rotating `logs/pipeline.log` (2 MB, three backups). Reusable stage
+functions emit log messages without configuring global application logging.
+Logs include run IDs, stage/check names, record counts, file hashes, durations
+and failure summaries. The file hash identifies a load without logging record
+contents. The formatter redacts the configured OpenAlex key and common credential
+query parameters; arbitrary exception strings and stack traces are not emitted
+by normal pipeline failure handling. Logs and lock files remain Git-ignored.
+
+Stage durations and total elapsed run duration are logged. Status inspection
+shows recent runs with start/end and duration seconds, last success and its age,
+file counts, pending work, latest quality scope and PASS/WARN/FAIL counts, Works
+and curated paper volumes, and the represented year range/distinct count.
+For a pipeline quality execution, counts cover that entire run; standalone
+counts cover that check execution. Quality timestamps are shown separately from
+pipeline freshness. Freshness is informational, with no arbitrary SLA. A recent
+no-op success does not imply that OpenAlex was freshly extracted.
+
+The Stage 9 tests cover result semantics, optional coverage calculations,
+persisted failures, raw metadata mismatches, missing IDs, duplicate papers,
+orphan links, negative citations, corrupt analytics, logging/redaction and
+blocking gates. A three-Work end-to-end fixture exercises raw → dlt → curated →
+quality → analytics, including shared authors/institutions, multiple topics,
+two publication years and missing optional fields. All destructive tests use
+temporary databases. No live API is needed, and no Stage 10 work is included.

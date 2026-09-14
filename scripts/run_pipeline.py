@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 from src.orchestration.pipeline import run_pipeline, DEFAULT_DATABASE, RAW_DIRECTORY, DEFAULT_OUTPUT
+from src.logging_config import configure_logging
 
 
 def main(argv=None):
@@ -16,6 +17,7 @@ def main(argv=None):
     parser.add_argument('--skip-visualizations', action='store_true')
     args = parser.parse_args(argv)
     try:
+        configure_logging()
         run_pipeline(**vars(args))
     except KeyboardInterrupt:
         return 130

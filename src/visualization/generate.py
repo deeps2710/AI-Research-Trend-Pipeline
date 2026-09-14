@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+import logging
+
+LOGGER = logging.getLogger("research_pipeline")
+
 import duckdb
 import pandas as pd
 
@@ -60,9 +64,9 @@ def generate_visualizations(db_path=DEFAULT_DATABASE, output_dir=DEFAULT_OUTPUT,
                 reason = ("multi-year observations and valid growth/trend data required"
                           if name in {"year_over_year_growth", "topic_trends"}
                           else "view/fields absent or no usable records")
-                print(f"Skipped {name}: {reason}")
+                LOGGER.info(f"Skipped {name}: {reason}")
                 skipped.append(name)
             else:
-                print(f"Saved {result}")
+                LOGGER.info(f"Saved {result}")
                 generated.append(result)
     return generated, skipped

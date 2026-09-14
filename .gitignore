@@ -21,3 +21,4 @@ data/warehouse/
 .dlt/secrets.toml
 outputs/
 *.pipeline.lock
+logs/

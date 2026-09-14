@@ -122,8 +122,11 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_empty_file_and_interrupted_run(self):
         self.path.write_text('')
+        with self.assertRaises(ValueError):
+            self.run_pipe()
+        self.assertEqual(self.query('SELECT records_loaded FROM ops.processed_files'), [])
+        self.write(1)
         self.run_pipe()
-        self.assertEqual(self.query('SELECT records_loaded FROM ops.processed_files'), [(0,)])
         p.execute(self.database,"INSERT INTO ops.pipeline_runs(run_id,status) VALUES ('interrupted','running')")
         self.run_pipe()
         self.assertEqual(self.query("SELECT status,error_stage FROM ops.pipeline_runs WHERE run_id='interrupted'"), [('failed','interrupted')])

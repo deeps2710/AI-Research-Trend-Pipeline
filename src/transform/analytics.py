@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+import logging
+
+LOGGER = logging.getLogger("research_pipeline")
+
 import duckdb
 
 from src.transform.curated import DEFAULT_DATABASE, TABLE_KEYS, columns, validate_curated
@@ -120,11 +124,11 @@ def build_analytics(database_path=DEFAULT_DATABASE):
                 query = render_sql(sql, available)
                 if query is None:
                     connection.execute(f"DROP VIEW IF EXISTS analytics.{name}")
-                    print(f"Omitted {name}: required optional source field is absent")
+                    LOGGER.info(f"Omitted {name}: required optional source field is absent")
                     continue
                 connection.execute(query)
                 created.append(name)
-                print(f"Created analytics.{name}")
+                LOGGER.info(f"Created analytics.{name}")
             validate_analytics(connection, created)
             kpis = overview(connection)
             connection.execute("COMMIT")

@@ -3,6 +3,10 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import logging
+
+LOGGER = logging.getLogger("research_pipeline")
+
 import duckdb
 
 DEFAULT_DATABASE = Path("data/warehouse/research_trends.duckdb")
@@ -103,32 +107,15 @@ def projections(found):
 
 
 def validate_curated(connection):
-    for table, keys in TABLE_KEYS.items():
-        nulls = " OR ".join(f"{key} IS NULL OR trim({key})=''" for key in keys)
-        if connection.execute(f"SELECT count(*) FROM curated.{table} WHERE {nulls}").fetchone()[0]:
-            raise CuratedError(f"Null/blank business key in curated.{table}")
-        key_sql = ", ".join(keys)
-        if connection.execute(
-            f"SELECT count(*) FROM (SELECT {key_sql} FROM curated.{table} "
-            f"GROUP BY {key_sql} HAVING count(*)>1)"
-        ).fetchone()[0]:
-            raise CuratedError(f"Duplicate grain in curated.{table}")
-    for bridge, dimension, key in (("paper_topics", "topics", "topic_id"),
-                                   ("paper_authors", "authors", "author_id"),
-                                   ("paper_institutions", "institutions", "institution_id")):
-        for target, target_key in (("papers", "paper_id"), (dimension, key)):
-            if connection.execute(
-                f"SELECT count(*) FROM curated.{bridge} b LEFT JOIN curated.{target} d "
-                f"ON b.{target_key}=d.{target_key} WHERE d.{target_key} IS NULL"
-            ).fetchone()[0]:
-                raise CuratedError(f"Broken reference from {bridge} to {target}")
-    if "publication_year" in columns(connection, "curated", "papers"):
-        maximum = datetime.now(timezone.utc).year + 1
-        if connection.execute(
-            "SELECT count(*) FROM curated.papers WHERE publication_year IS NOT NULL "
-            "AND (publication_year < 1500 OR publication_year > ?)", [maximum]
-        ).fetchone()[0]:
-            raise CuratedError(f"Publication year outside supported range 1500–{maximum}")
+    # The transactional builder and standalone quality runner share one contract.
+    from src.quality.checks import curated_checks
+    from src.quality.models import Status
+    results = curated_checks(connection)
+    failures = [result for result in results if result.status == Status.FAIL]
+    if failures:
+        error = CuratedError(failures[0].details or failures[0].check_name)
+        error.quality_results = results
+        raise error
 
 
 def build_curated(database_path=DEFAULT_DATABASE):
@@ -146,7 +133,7 @@ def build_curated(database_path=DEFAULT_DATABASE):
                 for name, value in substitutions.items():
                     query = query.replace("{{" + name + "}}", value)
                 connection.execute(query)
-                print(f"Built {sql_path.stem}")
+                LOGGER.info(f"Built {sql_path.stem}")
             validate_curated(connection)
             counts = {table: connection.execute(f"SELECT count(*) FROM curated.{table}").fetchone()[0]
                       for table in TABLE_KEYS}
