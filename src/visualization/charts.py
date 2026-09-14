@@ -1,4 +1,4 @@
-"""Reusable DataFrame-to-PNG charts. Return a Path, or None when unsupported."""
+"""Reusable charts: return a saved Path, an in-memory Figure, or None."""
 
 import math
 from pathlib import Path
@@ -42,6 +42,9 @@ def _figure(title, xlabel, ylabel, height=5):
 
 
 def _save(figure, output_path):
+    if output_path is None:
+        # Dashboard callers own and clear this figure after in-memory rendering.
+        return figure
     path = Path(output_path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

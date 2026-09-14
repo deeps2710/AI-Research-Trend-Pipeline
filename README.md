@@ -3,7 +3,7 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 6 — research trend visualization
+## Current status: Stage 7 — interactive research dashboard
 
 The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
 bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
@@ -13,6 +13,7 @@ Stage 4 rebuilds a separate `curated` schema from those ingestion tables using
 DuckDB SQL. No additional dependencies are needed.
 Stage 5 adds reusable SQL views in `analytics`, derived only from `curated`.
 Stage 6 reads those views into Pandas and saves static Matplotlib charts.
+Stage 7 adds a read-only Streamlit dashboard over the same warehouse.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -20,8 +21,7 @@ total matching count and up to 10 works with their title, year, citation
 count, type, and primary topic. Missing optional fields display as Unknown.
 This Stage 1 exploration command still prints results without saving data.
 
-Streamlit, ML, embeddings, recommendations, scheduling, and interactive
-dashboards are not implemented.
+ML, embeddings, recommendations, and scheduling are not implemented.
 
 ## Setup and run
 
@@ -531,5 +531,64 @@ can count for multiple entities, so entity bars are not additive corpus totals.
 Tests cover all plotting functions, empty/null data, one/multiple years, long
 labels, tied top-N selection, citation skew/zeros, unknown OA, and repeatable
 batch output including stale-chart cleanup. No pixel comparisons or API calls
-are required. Stage 7 will consume this foundation in an interactive Streamlit
-dashboard; it is not part of Stage 6.
+are required. Stage 7 consumes this foundation in an interactive dashboard.
+
+## Stage 7: interactive Streamlit dashboard
+
+Install `requirements.txt` (the only new direct dependency is `streamlit`),
+then run from the repository root with the virtual environment activated:
+
+```powershell
+streamlit run dashboard/app.py
+```
+
+Alternatively use `.venv\Scripts\python.exe -m streamlit run dashboard/app.py`.
+Build Stages 3–5 first using the existing CLI commands if the warehouse is
+missing. The dashboard never starts ingestion or rebuilds data.
+`dashboard/config.py` resolves the default
+`data/warehouse/research_trends.duckdb` relative to the repository. Set
+`RESEARCH_WAREHOUSE_PATH` to override it; no credentials are needed by the UI.
+
+The sidebar switches between five pages:
+
+- **Overview:** corpus KPIs, publication counts, top topics, and OA distribution.
+- **Research Trends:** yearly counts, available year-over-year change, and up to
+  five selected topic series. A single year displays an explanatory message.
+- **Topic Intelligence:** selected topic metrics, yearly counts, and its 20 most
+  cited associated papers.
+- **Paper Explorer:** publication year, associated topic, minimum citations,
+  OA status, citation/year/title sorting, and a 10–200 row limit. Filters affect
+  this page only; a zero minimum includes unknown citation counts.
+- **Authors & Institutions:** ranked charts and tables with a top-5 to top-30
+  control and explicit full-counting interpretation.
+
+The eight Stage 5 views consumed are `overview_kpis`, `publication_trends`,
+`topic_summary`, `topic_yearly_trends`, `top_papers`, `open_access_summary`,
+`author_summary`, and `institution_summary`. The only curated access is
+`curated.paper_topics` for an `EXISTS` filter: repeated topic links cannot
+multiply paper rows. No raw or ingestion tables are read.
+
+Queries use short-lived read-only DuckDB connections and parameterized filter
+values; identifiers and sort choices have fixed allowlists. `st.cache_data`
+caches DataFrames for 30 seconds, with at most 128 entries. Keys include the
+resolved database path, file modification time and size, SQL, and all filter
+parameters. Connections are never cached. Stop warehouse writers before
+opening the dashboard; after a CLI refresh, rerun the page to read new data.
+
+Stage 6 chart functions also accept `output_path=None` and return an in-memory
+Matplotlib Figure. The dashboard renders it with `st.pyplot`, then clears it;
+no temporary PNGs are written. A shared lock protects concurrent rendering.
+Existing file export commands retain their behavior.
+
+Coverage warnings and the loaded paper count/year range remain visible.
+The current bounded sample has 250 papers from 2025, so temporal growth cannot
+be inferred. Unknown OA remains unknown. Missing files/schema, absent optional
+views, null metrics, and empty filter results produce friendly messages.
+Topic selectors are bounded to the top 500 topics. Work type is not exposed
+because the existing analytical paper view does not contain it. Charts and
+rankings describe the current sample, not complete global AI research.
+
+`tests/test_dashboard.py` checks filters, query safety, result bounds, topic
+fanout, missing/empty data, in-memory rendering, and all five pages with
+Streamlit AppTest. Run the full suite with `python -m unittest discover -s tests`.
+There is no deployment, scheduled refresh, recommendation engine, or Stage 8.

@@ -3,3 +3,4 @@ python-dotenv
 dlt[duckdb]
 pandas
 matplotlib
+streamlit
