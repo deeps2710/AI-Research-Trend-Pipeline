@@ -39,6 +39,7 @@ class OpenAlexClient:
         self.session = requests.Session()
         self.max_retries = max_retries
         self.rate_limits = {}
+        self.source_match_count = None
 
     @property
     def authentication_used(self) -> bool:
@@ -128,11 +129,16 @@ class OpenAlexClient:
             raise ValueError("max_records must be a positive integer")
         cursor = "*"
         count = 0
+        self.source_match_count = None
         while cursor is not None:
             params["cursor"] = cursor
             if max_records is not None:
                 params["per_page"] = min(per_page, max_records - count)
             payload = self._request(params)
+            if cursor == "*":
+                matches = payload.get("meta", {}).get("count")
+                if type(matches) is int and matches >= 0:
+                    self.source_match_count = matches
             # Missing structural fields are errors, not successful empty runs.
             works = payload["results"]
             next_cursor = payload["meta"]["next_cursor"]

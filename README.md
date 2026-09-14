@@ -3,7 +3,7 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 7 — interactive research dashboard
+## Current status: Stage 8 — incremental pipeline orchestration
 
 The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
 bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
@@ -14,6 +14,7 @@ DuckDB SQL. No additional dependencies are needed.
 Stage 5 adds reusable SQL views in `analytics`, derived only from `curated`.
 Stage 6 reads those views into Pandas and saves static Matplotlib charts.
 Stage 7 adds a read-only Streamlit dashboard over the same warehouse.
+Stage 8 coordinates local incremental raw-file processing and downstream builds.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -591,4 +592,98 @@ rankings describe the current sample, not complete global AI research.
 `tests/test_dashboard.py` checks filters, query safety, result bounds, topic
 fanout, missing/empty data, in-memory rendering, and all five pages with
 Streamlit AppTest. Run the full suite with `python -m unittest discover -s tests`.
-There is no deployment, scheduled refresh, recommendation engine, or Stage 8.
+There is no deployment, scheduled refresh, or recommendation engine.
+
+## Stage 8: incremental raw-file processing
+
+From the repository root, with the virtual environment activated:
+
+```powershell
+python -m scripts.run_pipeline
+python -m scripts.pipeline_status
+python -m scripts.run_pipeline --force
+python -m scripts.run_pipeline --rebuild-downstream --skip-visualizations
+```
+
+Both CLIs accept `--database` and `--raw-directory`; the runner also accepts
+`--output-dir` for charts. Defaults are `data/warehouse/research_trends.duckdb`,
+`data/raw/openalex`, and `outputs/figures`. No new dependencies are needed.
+Streamlit remains a separate read-only application and is never launched by
+the orchestrator. Close dashboard sessions and other warehouse writers before
+running the pipeline. The lock coordinates orchestrator processes only; the
+older independent stage CLIs must not run concurrently with it.
+
+The order is **discover → dlt merge → curated → analytics → visualizations**,
+using existing Python functions directly. Discovery accepts top-level `.jsonl`
+files with a final `.metadata.json` completion marker, matching Stage 2's
+publication convention. Sidecar contents remain backward compatible; metadata
+is not used to decide whether Works content changed. In-progress files,
+sidecars themselves, JSON files, and JSONL without a final marker are ignored.
+Files are processed in lexicographic path order. If multiple files contain the
+same Work, the last processed record wins; file order does not establish API
+update chronology. Merge does not infer deletions from omitted Works.
+
+SHA-256 fingerprints identify **same normalized path + same content**. Paths
+inside the repository are stored relative to it; external paths are absolute.
+The loader reads a private temporary snapshot, validated with the Stage 3 JSONL
+reader, so the recorded fingerprint describes exactly the loaded bytes. Files
+modified after snapshotting are detected again next run. Renaming a file makes
+it eligible again. Empty completed files are recorded with zero records and
+do not alone trigger a rebuild. Missing/empty raw directories are a successful
+no-op; use the status command to check the configured location.
+
+Operational state lives in the same DuckDB database:
+
+- `ops.pipeline_runs`: unique run ID, UTC start/finish timestamps, running /
+  success / failed status, discovered/processed counts, and safe failure stage
+  and error summary.
+- `ops.processed_files`: path, SHA-256, byte size, successful processing time,
+  input record count, and run ID. `records_loaded` counts submitted JSONL records,
+  not newly inserted Works; duplicate IDs merge.
+- `ops.pipeline_state`: durable downstream and visualization pending flags.
+
+The first run loads eligible files and builds downstream layers. An unchanged
+second run skips loading and, when nothing is pending, skips all builds.
+`--force` reprocesses every discovered file through the existing Work-ID merge;
+it does not switch to append. `--rebuild-downstream` rebuilds curated/analytics
+without requiring raw changes. `--skip-visualizations` defers chart generation;
+the pending flag makes the next visualization-enabled run catch up. Success
+means the requested stages completed, including an intentional chart skip.
+
+Failures stop dependent stages and yield a nonzero CLI exit code. A failed load
+does not advance that file's fingerprint. Successful earlier files stay recorded
+when a later stage fails. Pending flags make the next run retry downstream work
+even if every raw file is unchanged. There is no cross-stage transaction: if a
+process stops after a merge but before recording the fingerprint, the next run
+may merge that file again safely. An OS-released advisory lock prevents concurrent
+orchestrators; after acquiring it, the next process marks abandoned `running`
+records failed/interrupted. The small `.pipeline.lock` companion stays local.
+Failures before database access is available cannot be written to its ops tables.
+
+`pipeline_status` reads the ten most recent runs, processed file count, most
+recent success, pending rebuild flags, and currently new/changed files. It does
+not create a missing warehouse. Error summaries deliberately exclude arbitrary
+exception text, raw records, credentials, and request URLs.
+
+Extraction sidecars now also contain `source_match_count`, `records_extracted`,
+`max_records_requested`, and `is_complete_extraction`; existing fields remain.
+The first API page supplies the source match count. Completeness is true only
+when that nonnegative count is known and extracted count reaches it. Unknown or
+capped coverage is not declared complete. This describes that query at extraction
+time, not complete global research or a consistent change-data snapshot. Existing
+sidecars without these fields remain supported, and dashboard coverage warnings
+remain conservative.
+
+This is **incremental local-file processing**, not API CDC. OpenAlex's
+[`from_updated_date` and `from_created_date` sync filters](https://help.openalex.org/api/filtering/)
+require an eligible paid plan. A future paid API-sync implementation could use
+them, but Stage 8 neither requires nor tests them. No automatic backfill utility
+is added. For bounded multi-year development samples, run existing Stage 2
+extraction separately with explicit `--year` and `--max-records`, then run the
+orchestrator. Equal per-year caps are sample limits, not publication volumes.
+
+Tests use temporary raw directories and databases to verify fingerprints,
+skip/force/change behavior, real merge stability, downstream repeatability,
+malformed-input handling, fail-fast execution, retry recovery, lock release,
+and run-state inspection. Core validation makes no OpenAlex requests. No
+scheduled execution, deployment, or Stage 9 functionality is included.

@@ -92,6 +92,16 @@ class ClientTests(unittest.TestCase):
                 list(self.client.iter_works())
                 get.assert_called_once()
 
+    def test_source_match_count_and_reset(self):
+        with patch.object(self.client, '_request', return_value={
+                'results': [{'id': '1'}], 'meta': {'count': 20, 'next_cursor': None}}):
+            list(self.client.iter_works(max_records=1))
+            self.assertEqual(self.client.source_match_count, 20)
+        with patch.object(self.client, '_request', return_value={
+                'results': [], 'meta': {'next_cursor': None}}):
+            list(self.client.iter_works())
+            self.assertIsNone(self.client.source_match_count)
+
     def test_cursor_can_cross_basic_paging_limit(self):
         page_number = 0
 
@@ -133,6 +143,21 @@ class ClientTests(unittest.TestCase):
 
 
 class ScriptTests(unittest.TestCase):
+    @patch("scripts.extract_openalex.OpenAlexClient")
+    def test_conservative_coverage_metadata(self, client_class):
+        client = client_class.return_value
+        client.authentication_used = False
+        for matches, complete in ((2, True), (10, False), (None, False)):
+            client.source_match_count = matches
+            client.iter_works.return_value = iter([{'id': '1'}, {'id': '2'}])
+            with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
+                self.assertEqual(main(['--output-dir',directory,'--max-records','2']), 0)
+                metadata = json.loads(next(Path(directory).glob('*.metadata.json')).read_text())
+                self.assertEqual(metadata['source_match_count'], matches)
+                self.assertEqual(metadata['records_extracted'], 2)
+                self.assertEqual(metadata['max_records_requested'], 2)
+                self.assertIs(metadata['is_complete_extraction'], complete)
+
     def test_argument_validation(self):
         for args in (["--max-records", "0"], ["--per-page", "101"],
                      ["--year", "-1"], ["--keyword", "../escape"],

@@ -62,6 +62,8 @@ def main(argv=None) -> int:
                 if count % 100 == 0:
                     print(f"Written {count} records")
 
+        matches = client.source_match_count
+        matches = matches if type(matches) is int and matches >= 0 else None
         metadata = {
             "source": "OpenAlex", "entity": "works",
             "keyword": args.keyword, "publication_year": args.year,
@@ -70,6 +72,10 @@ def main(argv=None) -> int:
             "requested_max_records": args.max_records,
             "actual_record_count": count, "per_page": args.per_page,
             "authentication_used": client.authentication_used,
+            "source_match_count": matches,
+            "records_extracted": count,
+            "max_records_requested": args.max_records,
+            "is_complete_extraction": matches is not None and count >= matches,
         }
         with metadata_pending.open("x", encoding="utf-8") as output:
             json.dump(metadata, output, ensure_ascii=False, indent=2)
