@@ -3,7 +3,7 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 5 — analytical SQL and KPIs
+## Current status: Stage 6 — research trend visualization
 
 The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
 bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
@@ -12,6 +12,7 @@ Stage 3 loads those local files into a persistent warehouse using
 Stage 4 rebuilds a separate `curated` schema from those ingestion tables using
 DuckDB SQL. No additional dependencies are needed.
 Stage 5 adds reusable SQL views in `analytics`, derived only from `curated`.
+Stage 6 reads those views into Pandas and saves static Matplotlib charts.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -19,8 +20,8 @@ total matching count and up to 10 works with their title, year, citation
 count, type, and primary topic. Missing optional fields display as Unknown.
 This Stage 1 exploration command still prints results without saving data.
 
-Stage 6 visualization, Pandas, Matplotlib, Streamlit, ML, embeddings,
-recommendations, and dashboards are not implemented.
+Streamlit, ML, embeddings, recommendations, scheduling, and interactive
+dashboards are not implemented.
 
 ## Setup and run
 
@@ -77,6 +78,10 @@ src/
     __init__.py
     curated.py            # Schema compatibility, SQL orchestration, quality checks
     analytics.py          # Analytical view build and KPI validation
+  visualization/
+    __init__.py
+    charts.py             # Reusable DataFrame-to-PNG plotting functions
+    generate.py           # Read-only analytical queries and batch generation
 scripts/
   __init__.py
   explore_openalex.py     # Terminal exploration entry point
@@ -87,14 +92,16 @@ scripts/
   inspect_curated.py      # Small samples from the seven curated tables
   build_analytics.py      # Build eight analytical views and validate KPIs
   inspect_analytics.py    # Up to five ordered rows per available view
+  generate_visualizations.py # Headless chart generation CLI
 sql/curated/              # Ordered SQL transformations, 01 through 07
 sql/analytics/            # Analytical SQL, 01 through 08
 tests/                   # Offline standard-library unit tests
 data/raw/openalex/        # Generated JSONL and provenance; Git-ignored
 data/warehouse/           # DuckDB file and local dlt state; Git-ignored
+outputs/figures/          # Generated report PNGs; Git-ignored
 .env.example             # API key placeholder
 .gitignore               # Secrets, caches, and local data exclusions
-requirements.txt         # requests, python-dotenv, dlt[duckdb]
+requirements.txt         # requests, python-dotenv, dlt[duckdb], pandas, matplotlib
 ```
 
 `OpenAlexClient.fetch_works()` accepts a keyword slug (default
@@ -444,4 +451,85 @@ The inspected local snapshot contains **250 papers**, all from **2025**, with
 papers (76.8%)**. It has **1,582 authors**, **300 topics**, and **804 institutions**.
 These describe this bounded extraction, not the global OpenAlex corpus.
 Year-over-year growth is unavailable because only one year is present.
-Stage 6 will visualize these analytical views; no visualization is included here.
+Stage 6 visualizes these analytical views as described below.
+
+## Research visualizations (Stage 6)
+
+Install updated dependencies and generate figures from the existing analytics:
+
+```bash
+python -m pip install -r requirements.txt
+python -m scripts.generate_visualizations
+python -m scripts.generate_visualizations --db-path data/warehouse/research_trends.duckdb --output-dir outputs/figures --top-n 10
+```
+
+If analytics is absent or stale, run `python -m scripts.build_analytics` after
+refreshing curated data. Chart generation never calls OpenAlex, reads raw
+JSONL, or accesses ingestion/curated rows directly. It opens DuckDB read-only
+and closes the connection after the batch. No API key is required.
+
+Pandas is introduced only as the small tabular input to plotting functions.
+Business aggregations remain in Stage 5 SQL. Ranked queries fetch only the
+requested top N; topic trends fetch at most five topics' yearly results.
+The citation histogram reads the full single citation column so it represents
+all available papers rather than a silently sampled subset.
+
+| PNG filename | Chart | Current 250-paper, 2025-only dataset |
+| --- | --- | --- |
+| `publications_over_time.png` | Ordered publication counts, with markers | Generated; one-year annotation |
+| `year_over_year_growth.png` | Bars using Stage 5 growth percentages | Skipped: multi-year data required |
+| `top_topics.png` | Top N topics by distinct paper count | Generated |
+| `topic_trends.png` | Up to five topics over time | Skipped: multi-year data required |
+| `citation_distribution.png` | Citation histogram with mean/median lines | Generated |
+| `top_cited_papers.png` | Top N papers by citation count | Generated |
+| `open_access_distribution.png` | OA category counts | Generated |
+| `top_authors.png` | Top N authors by distinct authored papers | Generated |
+| `top_institutions.png` | Top N institutions by distinct affiliated papers | Generated |
+
+Outputs default to `outputs/figures/`. Stable filenames are overwritten on
+rerun; if a chart becomes unsupported, its old batch output is removed to
+avoid presenting stale trends. Other files are preserved. The entire
+`outputs/` directory is Git-ignored; keep custom output directories beneath
+it or add an appropriate ignore rule yourself.
+
+Charts are 12 inches wide at 220 DPI, with restrained colors, integer count
+axes, wrapped labels, and constrained layout. Titles longer than 145 characters
+are shortened with an ellipsis; full titles remain in `analytics.top_papers`.
+Ties use business ID ascending. `--top-n` accepts 1–30 (default 10); topic
+time series deliberately stay capped at five, ranked by total observed yearly
+paper volume. Individual series require at least two years. Missing calendar
+years remain gaps rather than invented zero counts.
+
+Functions in `src.visualization.charts` accept a DataFrame and output path,
+return the saved Path or None when data is insufficient, and leave the input
+unchanged. Ranked functions expose `top_n`; `plot_topic_trends` also accepts
+explicit `topic_ids` (at most five). Rendering uses Matplotlib's
+[Agg canvas](https://matplotlib.org/stable/gallery/user_interfaces/canvasagg.html)
+without `plt.show()` or GUI windows. Figures are not registered with pyplot
+and are cleared after saving.
+
+Citation counts are strongly right-skewed. The default histogram bins
+`log(1 + citations)` and labels its ticks with original citation counts,
+including zero. Bin heights are paper counts, not density. Mean and median
+are calculated in original citation units and displayed separately. Nothing
+is winsorized or clipped. Pass `log_spacing=False` to the histogram function
+for linear spacing. Top cited papers use a linear axis by default; their
+function also accepts `log_scale=True` for a labeled symmetric-log axis.
+Null/non-finite/negative histogram inputs are excluded; zero citations remain.
+
+All charts say **current dataset** and carry a bounded-coverage caption.
+The repository does not establish complete yearly OpenAlex coverage. These
+plots must not be described as global AI/ML totals or global growth. One year
+cannot demonstrate temporal change, and null growth is never plotted as zero.
+Even future multi-year bounded extracts require comparable coverage before
+interpreting count changes as research growth.
+
+Unknown OA status remains unknown, never closed. Author and institution plots
+use distinct paper counts and Stage 5's full-counting semantics: a shared paper
+can count for multiple entities, so entity bars are not additive corpus totals.
+
+Tests cover all plotting functions, empty/null data, one/multiple years, long
+labels, tied top-N selection, citation skew/zeros, unknown OA, and repeatable
+batch output including stale-chart cleanup. No pixel comparisons or API calls
+are required. Stage 7 will consume this foundation in an interactive Streamlit
+dashboard; it is not part of Stage 6.

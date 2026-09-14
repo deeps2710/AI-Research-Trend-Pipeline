@@ -1,3 +1,5 @@
 requests
 python-dotenv
 dlt[duckdb]
+pandas
+matplotlib

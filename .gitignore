@@ -19,3 +19,4 @@ data/processed/
 data/warehouse/
 **/.dlt_pipelines/
 .dlt/secrets.toml
+outputs/
