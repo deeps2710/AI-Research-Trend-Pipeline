@@ -1,857 +1,230 @@
 # AI Research Trend & Paper Intelligence Pipeline
 
-A B.Tech Data Engineering project intended to collect scholarly metadata,
-track AI research trends, and help explore research papers using OpenAlex.
+A B.Tech Data Engineering project for collecting OpenAlex scholarly metadata and exploring the papers, topics, authors, and institutions in a local research dataset. It preserves replayable raw JSONL, normalizes it with dlt into DuckDB, builds relational entities and SQL analytics, and serves static charts and a read-only Streamlit dashboard. File-level incremental processing, quality gates, run history, and logs support repeatable local operation.
 
-## Current status: Stage 10 — configuration and engineering polish
+## Architecture
 
-The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
-bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
-Stage 3 loads those local files into a persistent warehouse using
-`dlt[duckdb]`, alongside the existing `requests` and `python-dotenv` dependencies.
-Stage 4 rebuilds a separate `curated` schema from those ingestion tables using
-DuckDB SQL. No additional dependencies are needed.
-Stage 5 adds reusable SQL views in `analytics`, derived only from `curated`.
-Stage 6 reads those views into Pandas and saves static Matplotlib charts.
-Stage 7 adds a read-only Streamlit dashboard over the same warehouse.
-Stage 8 coordinates local incremental raw-file processing and downstream builds.
-Stage 9 adds persisted quality checks, blocking integrity gates, logs, and health reporting.
-Stage 10 centralizes paths, preserves CLI aliases, and adds local lint/benchmark tooling.
+```mermaid
+flowchart LR
+    API[OpenAlex API] --> Extract[Python extraction]
+    Extract --> Raw[Raw JSONL and provenance]
+    Raw --> RawGate[Raw quality gate]
+    RawGate --> Load[dlt normalization and merge]
+    Load --> Ingest[DuckDB openalex_data]
+    Ingest --> Curated[curated tables]
+    Curated --> CuratedGate[Curated quality gate]
+    CuratedGate --> Analytics[analytics views]
+    Analytics --> AnalyticsGate[Analytics quality gate]
+    AnalyticsGate --> Charts[Matplotlib PNGs]
+    Analytics --> Dashboard[Streamlit dashboard]
+    Runner[Local orchestrator] -. coordinates .-> RawGate
+    Runner -. coordinates .-> Curated
+    Runner -. coordinates .-> Analytics
+    Runner -. coordinates .-> Charts
+    Runner --> Ops[ops state and quality history]
+    Runner --> Logs[Rotating logs]
+```
 
-Stage 1 establishes the Python project and retrieves one page of Machine
-Learning works published in **2025**. The exploration script displays the
-total matching count and up to 10 works with their title, year, citation
-count, type, and primary topic. Missing optional fields display as Unknown.
-This Stage 1 exploration command still prints results without saving data.
+Extraction is a separate command; the orchestrator starts with completed local files. The dashboard is launched independently after warehouse processing. It does not execute the gates or rebuild data on page loads.
 
-ML, embeddings, recommendations, and scheduling are not implemented.
+| Layer | Location / ownership |
+| --- | --- |
+| Raw | `data/raw/openalex/`: extraction-owned JSONL and matching `.metadata.json` completion markers |
+| Ingestion | `openalex_data`: dlt-owned `works`, normalized child tables and internal tracking tables; dlt also manages `openalex_data_staging` |
+| Curated | `curated`: seven project-owned SQL tables with explicit entity and relationship grains |
+| Analytics | `analytics`: SQL views over curated data, shared by charts and dashboard |
+| Operations | `ops`: pipeline runs, processed-file fingerprints, pending state and quality history |
 
-## Setup and run
+See [architecture and recovery](docs/architecture.md), [data model and metric definitions](docs/data_model.md), and the [5–8 minute demo](docs/demo.md).
 
-Prerequisites: Python 3.10 or newer, Git, and an internet connection for
-dependency installation and live API calls. Run commands from the repository root.
+## Coverage and methodology
 
-Windows PowerShell:
+**Counts describe the loaded dataset, not worldwide research totals.** OpenAlex is the source; extraction filters by keyword and publication year and is bounded by `--max-records`. A bounded selection is not a statistically representative sample. Equal per-year caps are extraction limits, not global publication volumes. Temporal claims require complete or otherwise appropriate, comparable coverage; one year cannot demonstrate growth.
+
+Each new provenance sidecar records the query, timestamps, requested cap, extracted count and first-page `source_match_count` when known. `is_complete_extraction` is true only when that known count is reached. It describes that query at extraction time, not the worldwide corpus or a consistent source snapshot. Unknown counts are not declared complete; older sidecars without these fields remain supported.
+
+Missing metadata stays unknown. Quality reporting measures DOI, title, primary-topic, author, institution and known open-access coverage. Citation averages exclude null counts. Confirmed-open-access shares include unknown flags in the denominator; unknown status is never treated as closed. Author, institution and topic totals use full counting and are not additive corpus totals.
+
+## Setup (Windows PowerShell)
+
+Use Python 3.11 or newer; validation has used **Python 3.13.4 on Windows**. Other interpreter versions have not been verified. Git and internet access are needed for cloning, dependency installation and live extraction. Run commands from the repository root.
 
 ```powershell
+git clone https://github.com/deeps2710/AI-Research-Trend-Pipeline.git
+cd AI-Research-Trend-Pipeline
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-macOS / Linux:
+Copy the template only on first setup. Edit `.env` and set `OPENALEX_API_KEY` to your own key. Existing environment variables take precedence. `.env` is ignored and must not be committed. A blank/example value sends no key; access then depends on OpenAlex's current anonymous limits. No credentials are needed to process existing local files.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-cp .env.example .env
-```
+If activation is restricted, use `.\.venv\Scripts\python.exe` in place of `python`, and `python -m streamlit` in place of `streamlit`. No package installation beyond the requirements file is required when running from the repository root. Runtime dependencies are not pinned, so a fresh install is not a locked environment.
 
-Edit `.env` and replace `your_openalex_api_key_here` with your own key from
-[OpenAlex API settings](https://openalex.org/settings/api). Never commit or
-share this file. Existing environment variables take precedence over `.env`.
-For small anonymous development requests, omit the key, leave it blank, or
-leave the example placeholder unchanged; the client sends no key in those cases.
-Anonymous access is subject to OpenAlex's current limits; see
-[authentication documentation](https://help.openalex.org/api/authentication/).
+## Quick start
 
-Run the exploration:
-
-```bash
-python -m scripts.explore_openalex
-```
-
-If PowerShell activation is restricted, use `.\.venv\Scripts\python.exe`
-in place of `python` for installation and execution.
-
-## Project structure
-
-```text
-src/
-  __init__.py
-  extract/
-    __init__.py
-    openalex_client.py    # Session-based Works API client
-  load/
-    __init__.py
-    openalex_dlt.py       # Streaming JSONL resource and DuckDB pipeline
-  transform/
-    __init__.py
-    curated.py            # Schema compatibility, SQL orchestration, quality checks
-    analytics.py          # Analytical view build and KPI validation
-  visualization/
-    __init__.py
-    charts.py             # Reusable DataFrame-to-PNG plotting functions
-    generate.py           # Read-only analytical queries and batch generation
-scripts/
-  __init__.py
-  explore_openalex.py     # Terminal exploration entry point
-  extract_openalex.py     # Bounded raw extraction CLI
-  load_openalex.py        # Load existing JSONL, without OpenAlex requests
-  inspect_warehouse.py    # Read-only table/count/sample inspection
-  build_curated.py        # Transactional curated rebuild
-  inspect_curated.py      # Small samples from the seven curated tables
-  build_analytics.py      # Build eight analytical views and validate KPIs
-  inspect_analytics.py    # Up to five ordered rows per available view
-  generate_visualizations.py # Headless chart generation CLI
-sql/curated/              # Ordered SQL transformations, 01 through 07
-sql/analytics/            # Analytical SQL, 01 through 08
-tests/                   # Offline standard-library unit tests
-data/raw/openalex/        # Generated JSONL and provenance; Git-ignored
-data/warehouse/           # DuckDB file and local dlt state; Git-ignored
-outputs/figures/          # Generated report PNGs; Git-ignored
-.env.example             # API key placeholder
-.gitignore               # Secrets, caches, and local data exclusions
-requirements.txt         # requests, python-dotenv, dlt[duckdb], pandas, matplotlib
-```
-
-`OpenAlexClient.fetch_works()` accepts a keyword slug (default
-`machine-learning`), an optional publication year, and `per_page` from 1 to
-100. It uses `keywords.id:machine-learning`, combines a supplied year with
-a comma-separated filter, and selects only the requested project metadata.
-Requests use a 30-second timeout and check HTTP status before decoding JSON.
-Call `close()` after using the client. Avoid logging request exceptions or
-URLs, which can contain the `api_key` query parameter.
-
-## Raw extraction
-
-```bash
-python -m scripts.extract_openalex --keyword machine-learning --year 2025 --max-records 250
-```
-
-These are also the defaults. For a small development check:
-
-```bash
-python -m scripts.extract_openalex --keyword machine-learning --year 2025 --max-records 5 --per-page 5
-```
-
-Use `--output-dir data/raw/openalex` to choose a local destination. Keywords
-must be lowercase hyphen-separated slugs. Record limits must be positive
-integers, years must be 1–9999, and page sizes must be 1–100.
-
-`iter_works()` starts with `cursor="*"` and follows `meta.next_cursor`, so it
-can go beyond the 10,000-result limit of numbered pages. It yields individual
-Work dictionaries and holds only one page in memory. It stops on an empty
-page, a null cursor, or the requested record limit. The library accepts
-`max_records=None` to iterate until exhaustion; the CLI always uses a positive
-bound. A page size of 100 reduces requests, and the last request is reduced
-to the remaining record allowance. See [OpenAlex paging](https://help.openalex.org/api/paging/).
-
-Both retrieval methods share a request helper. By default, transient HTTP
-429/500/502/503/504 responses, timeouts, and connection failures get at most
-three retries after the initial attempt, waiting 1, 2, then 4 seconds.
-Set `OpenAlexClient(max_retries=...)` to change this, or use 0 for no retries.
-Other HTTP errors and invalid JSON fail immediately. Each request has a
-30-second timeout. Retry warnings contain a status or failure category,
-never a request URL or key.
-
-The client exposes the latest available `X-RateLimit-Limit`,
-`X-RateLimit-Remaining`, `X-RateLimit-Credits-Used`, and `X-RateLimit-Reset`
-headers through `client.rate_limits`; this is informational, not a scheduler.
-See [OpenAlex usage headers](https://help.openalex.org/api/authentication/).
-
-Files use names such as `machine-learning_2025_20260913T120000000000Z.jsonl`.
-Each UTF-8 line is one raw selected Work object, with no analytical
-transformations. The matching `.metadata.json` records source, entity,
-keyword, year, UTC start/completion timestamps, requested and actual record
-counts, configured page size, and authentication usage as a boolean only.
-
-Data and metadata are first written with `.inprogress` suffixes and renamed
-after extraction succeeds. The final metadata sidecar is published last and
-signals completion. A failure returns a nonzero exit code; leftover files
-without a final sidecar must be treated as incomplete. Interrupted runs are
-not resumed automatically. The two renames are not a single atomic operation.
-
-Raw files, sidecars, and interrupted files are intentionally Git-ignored,
-including JSONL/sidecars written to custom output directories. No raw data or
-API credentials belong in commits.
-
-## Load into DuckDB
-
-Install the updated dependencies in the active virtual environment:
-
-```bash
-python -m pip install -r requirements.txt
-python -m scripts.load_openalex
-python -m scripts.inspect_warehouse
-```
-
-The loader prints the selected file. By default it finds the newest `.jsonl`
-by modification time in `data/raw/openalex`, requiring a matching final
-`.metadata.json` sidecar so interrupted Stage 2 runs are excluded. It fails
-if none exists. To choose a particular extraction:
-
-```bash
-python -m scripts.load_openalex --input-file data/raw/openalex/YOUR_EXTRACTION.jsonl
-```
-
-Replace `YOUR_EXTRACTION.jsonl` with the actual filename printed by Stage 2.
-An explicitly chosen JSONL does not require a sidecar. Metadata JSON and
-`.inprogress` files are never accepted as Works input. The loader reads UTF-8
-one record at a time, skips blank lines, and reports filename/line number for
-malformed JSON, non-object records, and missing or empty Work IDs. It does
-not call OpenAlex, load `.env`, or require an API key.
-
-The pipeline is `openalex_pipeline`, the dataset/schema is `openalex_data`,
-and the root resource/table is `works`. The default persistent database is
-`data/warehouse/research_trends.duckdb`; the schema name differs from the
-database catalog name to avoid ambiguous SQL references. Both CLIs accept
-`--database`:
-
-```bash
-python -m scripts.load_openalex --input-file data/raw/openalex/YOUR_EXTRACTION.jsonl --database data/warehouse/test.duckdb
-python -m scripts.inspect_warehouse --database data/warehouse/test.duckdb
-```
-
-[dlt](https://dlthub.com/docs/general-usage/destination-tables) infers columns
-and types, normalizes nested objects/lists, and manages loading. Nested lists
-create child tables; their names depend on the input, so the inspector
-discovers tables rather than assuming a fixed schema. DuckDB stores the
-result in a local file that persists after Python exits. No SQL tables are
-manually created, and no analytical transformations are performed.
-
-The resource uses `primary_key="id"` and `write_disposition="merge"` from the
-first load. The OpenAlex Work ID identifies the same paper across extractions.
-Loading the same file twice therefore leaves one root row per ID instead of
-doubling the rows: this is idempotency here. Loading newer metadata for the
-same ID updates fields such as citation counts. Replaying an older extraction
-can overwrite newer metadata; no freshness ordering is implemented yet.
-Root-key propagation is explicitly enabled on the source so dlt can replace
-nested descendants belonging to updated Works. See [dlt merge loading](https://dlthub.com/docs/general-usage/merge-loading).
-
-`_dlt_loads`, `_dlt_pipeline_state`, and `_dlt_version` support load, state, and
-schema tracking and must be retained. Repeat loads can add tracking records
-even when the Works count stays unchanged. dlt may also maintain a staging
-schema. The inspector lists schemas, discovered dataset tables, internal
-tables, root count, and up to five Works using available sample columns.
-
-Local dlt working state is stored beside the database under
-`.dlt_pipelines/<database-filename>/`, keeping overridden databases separate.
-That state, raw data, warehouse files, and credentials are Git-ignored.
-Load failures return a nonzero exit code; keep dlt state for diagnosis/retry
-and do not treat a failed run as a successful warehouse refresh. Close other
-processes holding the database if a file-lock error occurs.
-
-Stage 3 validation used the existing five-record Stage 2 extraction. Two
-separate CLI loads both left **5 Works / 5 distinct IDs**. With dlt 1.30.0 and
-DuckDB 1.5.5, this input generated the following dataset tables:
-
-```text
-works
-works__topics
-works__keywords
-works__authorships
-works__authorships__affiliations
-works__authorships__affiliations__institution_ids
-works__authorships__countries
-works__authorships__institutions
-works__authorships__institutions__lineage
-works__authorships__raw_affiliation_strings
-works__primary_location__source__host_organization_lineage
-works__primary_location__source__host_organization_lineage_names
-works__primary_location__source__issn
-_dlt_loads
-_dlt_pipeline_state
-_dlt_version
-```
-
-This is an observed inventory, not a fixed schema contract. dlt warned that
-`primary_location__pdf_url` and `primary_location__source` had no values from
-which to infer a type. Such fields can remain unmaterialized until typed
-values arrive; this did not fail the load. Nested source properties that had
-values were still normalized.
-
-## Local checks
-
-```bash
-python -m compileall -q src scripts tests
-python -m unittest discover -s tests -v
-git check-ignore .env data/raw/openalex/example.jsonl data/warehouse/research_trends.duckdb
-git status --short
-```
-
-Tests use mocked HTTP responses and real temporary DuckDB databases. They
-check repeat-load root/child counts, updated citations, removal of obsolete
-nested records, input validation, and warehouse inspection. They do not call
-OpenAlex. Stage 1 exploration and Stage 2 extraction still require network
-access; Stage 3 reads local files only.
-
-
-## Curated model (Stage 4)
-
-The flow is raw JSONL → dlt-normalized `openalex_data` → SQL → `curated`.
-`openalex_data` and its `_dlt_` tables remain owned by dlt. Stage 4 never
-changes those tables. The new schema is a current snapshot, rebuilt after
-new Stage 3 loads; it is not refreshed automatically.
-
-```bash
-python -m scripts.build_curated
-python -m scripts.inspect_curated
-```
-
-Both commands accept `--database data/warehouse/research_trends.duckdb`.
-They operate locally without an API key. Run all module commands from the
-repository root. SQL files are located relative to the Python module.
-
-| Curated table | Grain / business key | Validated local rows |
-| --- | --- | ---: |
-| `papers` | One Work / `paper_id` | 250 |
-| `topics` | One Topic / `topic_id` | 300 |
-| `paper_topics` | One `(paper_id, topic_id)` pair | 719 |
-| `authors` | One Author / `author_id` | 1582 |
-| `paper_authors` | One `(paper_id, author_id)` pair | 1614 |
-| `institutions` | One Institution / `institution_id` | 804 |
-| `paper_institutions` | One `(paper_id, institution_id)` pair | 1004 |
-
-These counts describe the local warehouse used for validation, not fixed
-expectations for other extractions. Actual source tables were inspected with
-DuckDB metadata and DESCRIBE before writing the transformations:
-`works`, `works__topics`, `works__authorships`, and
-`works__authorships__institutions`, all in `openalex_data`.
-
-OpenAlex IDs are the public business keys. Internal joins use topic and
-authorship `_dlt_parent_id` to Work `_dlt_id`; institutions join through their
-parent authorship before reaching the Work. Those technical lineage keys
-are excluded from curated outputs. Missing/blank entity IDs are not invented:
-those entities are omitted while their identified paper remains.
-
-Papers preserve available DOI, title, year, date, type, citations, open-access
-status, primary topic, and primary source ID/name. Dates retain the source
-representation. Topics include the available subfield/field/domain hierarchy.
-Author bridges retain available position and corresponding-author attributes.
-Institution bridges deduplicate affiliations shared by multiple authors on
-the same paper. The observed warehouse supports all requested optional
-paper/topic/author/institution attributes; null values remain null. Separate
-source and keyword dimensions are outside this required seven-table model.
-
-Python inspects materialized source columns and substitutes only available
-projections into the SQL templates. An absent optional column is omitted,
-not filled with fabricated values. Absent nested tables yield empty key-only
-curated dimensions/bridges. Nested tables without entity IDs still retain
-lineage internally, allowing identified institutions to survive an unknown
-author. A missing root table or required lineage column is incompatible.
-
-Dimension labels use a deterministic representative from the earliest
-lexicographic Work ID, with lineage/row content as tie breakers; no claim is
-made that this is the newest label. Duplicate authorship pairs use the lowest
-technical authorship ID's attributes. Duplicate topic pairs retain the maximum
-score. Primary-topic flags compare the relationship's topic ID with the Work's
-primary topic ID; unknown primary topics produce null flags.
-
-The bridges represent separate many-to-many relationships. Combining authors,
-topics, and institutions into one flat table would multiply rows: two authors
-and three topics can produce six rows for one paper. Summing citations over
-that join would overcount. Citation counts remain at paper grain; Stage 5 must
-choose the relationship grain deliberately when it adds analytics.
-
-SQL runs in filename order using `CREATE OR REPLACE TABLE` inside one transaction.
-Checks reject null/blank or duplicate business keys, duplicate bridge pairs,
-broken bridge references, and orphan source lineage. Non-null publication years
-must be between 1500 and the current UTC year plus one; this project policy
-allows forthcoming works but rejects obviously invalid years. Historical
-collections before 1500 require an explicit policy adjustment. Null years are
-allowed. A failed build rolls back, preserving the previous curated snapshot.
-Running twice against unchanged ingestion data leaves counts unchanged.
-
-Tests use small local DuckDB fixtures and cover repeat builds, missing nested
-structures, key uniqueness, references, invalid years, and rollback. No API
-extraction is needed. The inspector prints counts and at most three rows per
-table. Raw files and the shared DuckDB warehouse remain Git-ignored. Stage 5
-uses this layer for the analytical views described below.
-
-## Analytical SQL and KPIs (Stage 5)
-
-`openalex_data` retains ingestion and dlt state; `curated` retains entity and
-relationship grains; `analytics` provides derived query results. Stage 5
-creates views, not a second copy of the curated model. It adds no dependencies
-and makes no OpenAlex requests.
-
-```bash
-python -m scripts.build_analytics
-python -m scripts.inspect_analytics
-```
-
-Both accept `--database data/warehouse/research_trends.duckdb`. Avoid database
-filenames `analytics.duckdb` and `curated.duckdb`, which conflict with schema
-names in DuckDB. Build Stage 4 first. After reloading Stage 3, rebuild Stage 4
-to refresh its snapshot, then rebuild Stage 5 to revalidate the views.
-
-| View in `analytics` | Grain and purpose |
-| --- | --- |
-| `overview_kpis` | One row: papers, citations, mean/median citations, OA count/share, unique entities, year range |
-| `publication_trends` | One observed non-null publication year: paper/citation totals and growth |
-| `topic_summary` | One linked topic: distinct papers, citations, mean/median citations, OA share |
-| `topic_yearly_trends` | One linked topic and observed year: paper/citation totals and growth |
-| `top_papers` | Every paper, with citation rank and available descriptive fields |
-| `author_summary` | One linked author: distinct authored papers, citations, average and OA measures |
-| `institution_summary` | One linked institution: distinct affiliated papers and citation measures |
-| `open_access_summary` | One OA status, including `unknown`: papers and share of all papers |
-
-The builder validates all seven Stage 4 key structures before running the
-ordered SQL files. Simple `-- if` blocks include optional metrics only when
-their underlying columns exist. Missing year or OA-status columns omit the
-corresponding whole views; other missing fields omit only their metrics.
-The current warehouse supports all eight views and all requested KPIs.
-No unavailable-source metrics were filled with invented values.
-
-Views use [CREATE OR REPLACE VIEW](https://duckdb.org/docs/current/sql/statements/create_view)
-inside a transaction. They query current curated rows when read. Failure
-rolls back definition changes; repeated builds do not append data. Optional
-view definitions are removed if their required fields disappear. After a
-curated schema change, rebuild analytics before querying it. Unchanged data,
-schema, and reference year produce unchanged results.
-
-Yearly views exclude null publication years; their paper counts therefore
-reconcile to papers with known years, not necessarily the overview total.
-`LAG` finds the previous observed year/count (partitioned by topic for topic
-trends). A prior count is exposed only when that year is the immediately
-preceding calendar year. Growth is `100 * (current - previous) / previous`,
-with `NULLIF(previous, 0)` protecting division. The first year, missing-year
-gaps, or zero denominators yield null growth. Missing years are not invented
-as zero-volume observations. No fastest-growing topic ranking is created.
-
-Citation sums use available citation values; averages and medians exclude
-null citation counts. Empty/all-null citation groups return null aggregates,
-not fabricated zero citations. Confirmed-open-access percentages divide the
-number of `is_open_access=true` papers by **all** papers in that group, including
-unknown flags in the denominator. They measure confirmed OA coverage, not
-the closed share. Missing/blank OA status is grouped as `unknown`, never
-inferred to be closed. Empty-group percentages are null.
-
-Each domain independently joins one distinct bridge to papers. There is no
-paper × topic × author × institution intermediate table. Citation totals use
-full counting: a paper's full citations are attributed to each associated
-topic, author, and institution rather than divided among them. Thus domain
-totals must not be summed across entities to estimate unique corpus citations.
-Unlinked dimension entities remain in overview unique-entity counts but do
-not appear in relationship-based summaries.
-
-Top papers use `ROW_NUMBER` ordered by citations descending, nulls last, then
-paper ID ascending for deterministic ties. The view has no permanent top-N
-limit. Consumers must explicitly order by `citation_rank` and choose a limit.
-
-Raw citations favor older papers. `citations_per_year_since_publication` is
-a **project-derived heuristic**, not an official OpenAlex metric or bibliometric
-standard: `cited_by_count / max(1, reference_year - publication_year + 1)`.
-`citation_reference_year` is the current database-session calendar year at
-query time. Null/future publication years yield null, and missing citation
-counts remain null. This calendar-year approximation does not account for
-exact publication dates or field differences; with only one publication year
-it provides no additional ranking distinction over raw citations.
-
-Validation checks reconcile overview and yearly counts, OA category counts,
-and distinct paper counts per topic/author/institution. They reject negative
-counts, shares outside 0–100, non-finite division results, invalid ranking,
-and broken curated keys/references. Growth percentages can legitimately be
-negative or above 100; only finiteness is required for those percentages.
-Fixture tests cover consecutive years, gaps, unknown years/OA, tied citations,
-empty input, missing optional fields, full counting, and repeat builds.
-
-The inspected local snapshot contains **250 papers**, all from **2025**, with
-**53,488 citations**, mean **213.952**, median **87.5**, and **192 confirmed OA
-papers (76.8%)**. It has **1,582 authors**, **300 topics**, and **804 institutions**.
-These describe this bounded extraction, not the global OpenAlex corpus.
-Year-over-year growth is unavailable because only one year is present.
-Stage 6 visualizes these analytical views as described below.
-
-## Research visualizations (Stage 6)
-
-Install updated dependencies and generate figures from the existing analytics:
-
-```bash
-python -m pip install -r requirements.txt
-python -m scripts.generate_visualizations
-python -m scripts.generate_visualizations --db-path data/warehouse/research_trends.duckdb --output-dir outputs/figures --top-n 10
-```
-
-If analytics is absent or stale, run `python -m scripts.build_analytics` after
-refreshing curated data. Chart generation never calls OpenAlex, reads raw
-JSONL, or accesses ingestion/curated rows directly. It opens DuckDB read-only
-and closes the connection after the batch. No API key is required.
-
-Pandas is introduced only as the small tabular input to plotting functions.
-Business aggregations remain in Stage 5 SQL. Ranked queries fetch only the
-requested top N; topic trends fetch at most five topics' yearly results.
-The citation histogram reads the full single citation column so it represents
-all available papers rather than a silently sampled subset.
-
-| PNG filename | Chart | Current 250-paper, 2025-only dataset |
-| --- | --- | --- |
-| `publications_over_time.png` | Ordered publication counts, with markers | Generated; one-year annotation |
-| `year_over_year_growth.png` | Bars using Stage 5 growth percentages | Skipped: multi-year data required |
-| `top_topics.png` | Top N topics by distinct paper count | Generated |
-| `topic_trends.png` | Up to five topics over time | Skipped: multi-year data required |
-| `citation_distribution.png` | Citation histogram with mean/median lines | Generated |
-| `top_cited_papers.png` | Top N papers by citation count | Generated |
-| `open_access_distribution.png` | OA category counts | Generated |
-| `top_authors.png` | Top N authors by distinct authored papers | Generated |
-| `top_institutions.png` | Top N institutions by distinct affiliated papers | Generated |
-
-Outputs default to `outputs/figures/`. Stable filenames are overwritten on
-rerun; if a chart becomes unsupported, its old batch output is removed to
-avoid presenting stale trends. Other files are preserved. The entire
-`outputs/` directory is Git-ignored; keep custom output directories beneath
-it or add an appropriate ignore rule yourself.
-
-Charts are 12 inches wide at 220 DPI, with restrained colors, integer count
-axes, wrapped labels, and constrained layout. Titles longer than 145 characters
-are shortened with an ellipsis; full titles remain in `analytics.top_papers`.
-Ties use business ID ascending. `--top-n` accepts 1–30 (default 10); topic
-time series deliberately stay capped at five, ranked by total observed yearly
-paper volume. Individual series require at least two years. Missing calendar
-years remain gaps rather than invented zero counts.
-
-Functions in `src.visualization.charts` accept a DataFrame and output path,
-return the saved Path or None when data is insufficient, and leave the input
-unchanged. Ranked functions expose `top_n`; `plot_topic_trends` also accepts
-explicit `topic_ids` (at most five). Rendering uses Matplotlib's
-[Agg canvas](https://matplotlib.org/stable/gallery/user_interfaces/canvasagg.html)
-without `plt.show()` or GUI windows. Figures are not registered with pyplot
-and are cleared after saving.
-
-Citation counts are strongly right-skewed. The default histogram bins
-`log(1 + citations)` and labels its ticks with original citation counts,
-including zero. Bin heights are paper counts, not density. Mean and median
-are calculated in original citation units and displayed separately. Nothing
-is winsorized or clipped. Pass `log_spacing=False` to the histogram function
-for linear spacing. Top cited papers use a linear axis by default; their
-function also accepts `log_scale=True` for a labeled symmetric-log axis.
-Null/non-finite/negative histogram inputs are excluded; zero citations remain.
-
-All charts say **current dataset** and carry a bounded-coverage caption.
-The repository does not establish complete yearly OpenAlex coverage. These
-plots must not be described as global AI/ML totals or global growth. One year
-cannot demonstrate temporal change, and null growth is never plotted as zero.
-Even future multi-year bounded extracts require comparable coverage before
-interpreting count changes as research growth.
-
-Unknown OA status remains unknown, never closed. Author and institution plots
-use distinct paper counts and Stage 5's full-counting semantics: a shared paper
-can count for multiple entities, so entity bars are not additive corpus totals.
-
-Tests cover all plotting functions, empty/null data, one/multiple years, long
-labels, tied top-N selection, citation skew/zeros, unknown OA, and repeatable
-batch output including stale-chart cleanup. No pixel comparisons or API calls
-are required. Stage 7 consumes this foundation in an interactive dashboard.
-
-## Stage 7: interactive Streamlit dashboard
-
-Install `requirements.txt` (the only new direct dependency is `streamlit`),
-then run from the repository root with the virtual environment activated:
+This live request saves at most five papers. Skip extraction if completed local raw files are already available.
 
 ```powershell
+python -m scripts.extract_openalex --keyword machine-learning --year 2025 --max-records 5 --per-page 5
+python -m scripts.run_pipeline
+python -m scripts.check_data_quality
+python -m scripts.pipeline_status
 streamlit run dashboard/app.py
 ```
 
-Alternatively use `.venv\Scripts\python.exe -m streamlit run dashboard/app.py`.
-Build Stages 3–5 first using the existing CLI commands if the warehouse is
-missing. The dashboard never starts ingestion or rebuilds data.
-`dashboard/config.py` resolves the default
-`data/warehouse/research_trends.duckdb` relative to the repository. Set
-`RESEARCH_WAREHOUSE_PATH` to override it; no credentials are needed by the UI.
+The runner processes **all new or changed completed files** in its raw directory, not just the latest extraction. On an empty clone, charts and some dashboard sections may have insufficient data. WARN results can be expected for sparse metadata or a single year; FAIL results require correction before proceeding.
 
-The sidebar switches between five pages:
+Stop the dashboard and other warehouse users before running write commands, including the quality checker (which persists ops history). Then relaunch the dashboard. DuckDB is a local file database; the orchestrator lock does not coordinate independently launched stage CLIs.
 
-- **Overview:** corpus KPIs, publication counts, top topics, and OA distribution.
-- **Research Trends:** yearly counts, available year-over-year change, and up to
-  five selected topic series. A single year displays an explanatory message.
-- **Topic Intelligence:** selected topic metrics, yearly counts, and its 20 most
-  cited associated papers.
-- **Paper Explorer:** publication year, associated topic, minimum citations,
-  OA status, citation/year/title sorting, and a 10–200 row limit. Filters affect
-  this page only; a zero minimum includes unknown citation counts.
-- **Authors & Institutions:** ranked charts and tables with a top-5 to top-30
-  control and explicit full-counting interpretation.
+Defaults are anchored to the repository in `src/config.py`: raw files in `data/raw/openalex`, warehouse at `data/warehouse/research_trends.duckdb`, charts in `outputs/figures`, logs in `logs`. Explicit relative path overrides resolve from the caller's working directory. The dashboard accepts `RESEARCH_WAREHOUSE_PATH` as an environment override. Avoid database filenames `curated.duckdb` and `analytics.duckdb`, which conflict with schema names.
 
-The eight Stage 5 views consumed are `overview_kpis`, `publication_trends`,
-`topic_summary`, `topic_yearly_trends`, `top_papers`, `open_access_summary`,
-`author_summary`, and `institution_summary`. The only curated access is
-`curated.paper_topics` for an `EXISTS` filter: repeated topic links cannot
-multiply paper rows. No raw or ingestion tables are read.
+## Commands
 
-Queries use short-lived read-only DuckDB connections and parameterized filter
-values; identifiers and sort choices have fixed allowlists. `st.cache_data`
-caches DataFrames for 30 seconds, with at most 128 entries. Keys include the
-resolved database path, file modification time and size, SQL, and all filter
-parameters. Connections are never cached. Stop warehouse writers before
-opening the dashboard; after a CLI refresh, rerun the page to read new data.
+Every database CLI accepts `--db-path PATH` and its compatible alias `--database PATH`. All module commands support `--help`. Individual stages are useful for inspection or debugging; the orchestrator supplies the full ordered workflow and persisted gates.
 
-Stage 6 chart functions also accept `output_path=None` and return an in-memory
-Matplotlib Figure. The dashboard renders it with `st.pyplot`, then clears it;
-no temporary PNGs are written. A shared lock protects concurrent rendering.
-Existing file export commands retain their behavior.
+| Command (prefix with `python -m scripts.`) | Purpose / additional options |
+| --- | --- |
+| `explore_openalex` | Live machine-learning/2025 preview, up to 10 papers; saves nothing |
+| `extract_openalex` | Bounded extraction: `--keyword`, `--year`, `--max-records`, `--per-page`, `--output-dir` |
+| `load_openalex` | dlt merge of `--input-file PATH`; defaults to newest completed raw file by modification time |
+| `inspect_warehouse` | Discover ingestion tables, counts and small samples |
+| `build_curated` / `inspect_curated` | Rebuild / inspect the seven relational tables |
+| `build_analytics` / `inspect_analytics` | Rebuild / inspect analytical views |
+| `generate_visualizations` | PNG export; `--output-dir`, `--top-n` (1–30, default 10) |
+| `run_pipeline` | `--raw-directory`, `--output-dir`, `--force`, `--rebuild-downstream`, `--skip-visualizations` |
+| `check_data_quality` | Check curated/analytics data and persist results; nonzero exit on FAIL |
+| `pipeline_status` | Read health, history and pending work; `--raw-directory` |
+| `benchmark_pipeline` | Time builds/checks/queries on a temporary database copy; optional `--explain` |
 
-Coverage warnings and the loaded paper count/year range remain visible.
-The current bounded sample has 250 papers from 2025, so temporal growth cannot
-be inferred. Unknown OA remains unknown. Missing files/schema, absent optional
-views, null metrics, and empty filter results produce friendly messages.
-Topic selectors are bounded to the top 500 topics. Work type is not exposed
-because the existing analytical paper view does not contain it. Charts and
-rankings describe the current sample, not complete global AI research.
+Extraction defaults: keyword `machine-learning`, year `2025`, maximum 250 records and page size 100. Keywords are lowercase hyphenated slugs; page sizes are 1–100. An explicitly chosen loader input must be a Works JSONL file; unlike automatic discovery, it need not have a sidecar.
 
-`tests/test_dashboard.py` checks filters, query safety, result bounds, topic
-fanout, missing/empty data, in-memory rendering, and all five pages with
-Streamlit AppTest. Run the full suite with `python -m unittest discover -s tests`.
-There is no deployment, scheduled refresh, or recommendation engine.
-
-## Stage 8: incremental raw-file processing
-
-From the repository root, with the virtual environment activated:
+Examples for local rebuilds and inspection:
 
 ```powershell
-python -m scripts.run_pipeline
-python -m scripts.pipeline_status
-python -m scripts.run_pipeline --force
 python -m scripts.run_pipeline --rebuild-downstream --skip-visualizations
+python -m scripts.inspect_warehouse
+python -m scripts.inspect_curated
+python -m scripts.inspect_analytics
+python -m scripts.generate_visualizations --db-path data/warehouse/research_trends.duckdb --output-dir outputs/figures --top-n 10
 ```
 
-Both CLIs accept `--database` and `--raw-directory`; the runner also accepts
-`--output-dir` for charts. Defaults are `data/warehouse/research_trends.duckdb`,
-`data/raw/openalex`, and `outputs/figures`. No new dependencies are needed.
-Streamlit remains a separate read-only application and is never launched by
-the orchestrator. Close dashboard sessions and other warehouse writers before
-running the pipeline. The lock coordinates orchestrator processes only; the
-older independent stage CLIs must not run concurrently with it.
+## Curated model and analytics
 
-The order is **discover → dlt merge → curated → analytics → visualizations**,
-using existing Python functions directly. Discovery accepts top-level `.jsonl`
-files with a final `.metadata.json` completion marker, matching Stage 2's
-publication convention. Sidecar contents remain backward compatible; metadata
-is not used to decide whether Works content changed. In-progress files,
-sidecars themselves, JSON files, and JSONL without a final marker are ignored.
-Files are processed in lexicographic path order. If multiple files contain the
-same Work, the last processed record wins; file order does not establish API
-update chronology. Merge does not infer deletions from omitted Works.
+OpenAlex IDs are business keys. dlt's `_dlt_id` / `_dlt_parent_id` connect normalized ingestion records and are excluded from curated outputs.
 
-SHA-256 fingerprints identify **same normalized path + same content**. Paths
-inside the repository are stored relative to it; external paths are absolute.
-The loader reads a private temporary snapshot, validated with the Stage 3 JSONL
-reader, so the recorded fingerprint describes exactly the loaded bytes. Files
-modified after snapshotting are detected again next run. Renaming a file makes
-it eligible again. Stage 9 rejects empty completed files at the raw quality gate.
-Missing/empty raw directories are a successful
-no-op; use the status command to check the configured location.
+| Table in `curated` | Grain / logical key |
+| --- | --- |
+| `papers` | One Work / `paper_id` |
+| `topics` | One identified topic / `topic_id` |
+| `paper_topics` | One distinct `(paper_id, topic_id)` relationship |
+| `authors` | One identified author / `author_id` |
+| `paper_authors` | One distinct `(paper_id, author_id)` relationship |
+| `institutions` | One identified institution / `institution_id` |
+| `paper_institutions` | One distinct `(paper_id, institution_id)` relationship |
 
-Operational state lives in the same DuckDB database:
+Separate many-to-many bridges prevent a paper's authors, topics and institutions from multiplying one another. Relationship summaries use `COUNT(DISTINCT paper_id)` and deduplicated pairs; citations are summed within one relationship domain at a time. See the [ER diagram and optional attributes](docs/data_model.md).
 
-- `ops.pipeline_runs`: unique run ID, UTC start/finish timestamps, running /
-  success / failed status, discovered/processed counts, and safe failure stage
-  and error summary.
-- `ops.processed_files`: path, SHA-256, byte size, successful processing time,
-  input record count, and run ID. `records_loaded` counts submitted JSONL records,
-  not newly inserted Works; duplicate IDs merge.
-- `ops.pipeline_state`: durable downstream and visualization pending flags.
+| View in `analytics` | Provides |
+| --- | --- |
+| `overview_kpis` | One row: papers, citations, mean/median, confirmed OA count/share, unique entities and year range |
+| `publication_trends` | Observed year totals and consecutive-year growth |
+| `topic_summary` | Distinct papers, citation measures and OA share per linked topic |
+| `topic_yearly_trends` | Topic/year volumes, citations and consecutive-year growth |
+| `top_papers` | Every paper, deterministic citation rank and available descriptive/age-adjusted fields |
+| `author_summary` | Distinct authored papers, full-count citations and OA measures |
+| `institution_summary` | Distinct affiliated papers and full-count citation measures |
+| `open_access_summary` | Paper counts and shares by status, including unknown |
 
-The first run loads eligible files and builds downstream layers. An unchanged
-second run skips loading and, when nothing is pending, skips all builds.
-`--force` reprocesses every discovered file through the existing Work-ID merge;
-it does not switch to append. `--rebuild-downstream` rebuilds curated/analytics
-without requiring raw changes. `--skip-visualizations` defers chart generation;
-the pending flag makes the next visualization-enabled run catch up. Success
-means the requested stages completed, including an intentional chart skip.
+Optional source columns determine available metrics; absent year or OA-status columns omit their dependent views. Year-over-year growth is `100 * (current - previous) / previous`, only for consecutive observed calendar years with a nonzero denominator. Missing years are not filled with zero.
 
-Failures stop dependent stages and yield a nonzero CLI exit code. A failed load
-does not advance that file's fingerprint. Successful earlier files stay recorded
-when a later stage fails. Pending flags make the next run retry downstream work
-even if every raw file is unchanged. There is no cross-stage transaction: if a
-process stops after a merge but before recording the fingerprint, the next run
-may merge that file again safely. An OS-released advisory lock prevents concurrent
-orchestrators; after acquiring it, the next process marks abandoned `running`
-records failed/interrupted. The small `.pipeline.lock` companion stays local.
-Failures before database access is available cannot be written to its ops tables.
+The project-derived citation-age heuristic divides citations by `max(1, current_year - publication_year + 1)` at query time; null/future years yield null. It is not a field-normalized impact measure and does not remove citation-age bias. Full-count attribution gives each linked author/institution the paper's full citations, irrespective of contributor count.
 
-`pipeline_status` reads the ten most recent runs, processed file count, most
-recent success, pending rebuild flags, and currently new/changed files. It does
-not create a missing warehouse. Error summaries deliberately exclude arbitrary
-exception text, raw records, credentials, and request URLs.
+## Incremental processing and operations
 
-Extraction sidecars now also contain `source_match_count`, `records_extracted`,
-`max_records_requested`, and `is_complete_extraction`; existing fields remain.
-The first API page supplies the source match count. Completeness is true only
-when that nonnegative count is known and extracted count reaches it. Unknown or
-capped coverage is not declared complete. This describes that query at extraction
-time, not complete global research or a consistent change-data snapshot. Existing
-sidecars without these fields remain supported, and dashboard coverage warnings
-remain conservative.
+The orchestrator compares normalized file paths and SHA-256 hashes against `ops.processed_files`. Unchanged files are skipped; changed/new files are validated and merged by Work ID. An unchanged run with no pending work skips downstream builds too. `--force` reprocesses discovered files using merge; `--rebuild-downstream` refreshes derived layers without requiring raw changes. `--skip-visualizations` leaves charts pending for the next enabled run.
 
-This is **incremental local-file processing**, not API CDC. OpenAlex's
-[`from_updated_date` and `from_created_date` sync filters](https://help.openalex.org/api/filtering/)
-require an eligible paid plan. A future paid API-sync implementation could use
-them, but Stage 8 neither requires nor tests them. No automatic backfill utility
-is added. For bounded multi-year development samples, run existing Stage 2
-extraction separately with explicit `--year` and `--max-records`, then run the
-orchestrator. Equal per-year caps are sample limits, not publication volumes.
+Ordering is raw quality → dlt → curated → curated quality → analytics → analytics quality → optional charts. Failures stop dependent work; durable pending flags support retries. Runs, safe error summaries and submitted record counts are retained in `ops`. This is file-level incremental ingestion. API CDC, source deletion handling and source-update ordering are not implemented. OpenAlex's updated/created-date synchronization filters require eligible paid access; see [OpenAlex sync-filter documentation](https://help.openalex.org/api/filtering/).
 
-Tests use temporary raw directories and databases to verify fingerprints,
-skip/force/change behavior, real merge stability, downstream repeatability,
-malformed-input handling, fail-fast execution, retry recovery, lock release,
-and run-state inspection. Core validation makes no OpenAlex requests. No
-scheduled execution or deployment is included.
+| Quality status | Meaning |
+| --- | --- |
+| PASS | The stated check condition holds |
+| WARN | Optional metadata is sparse or temporal coverage is insufficient; processing continues |
+| FAIL | Invalid raw/schema/identity/references/metrics; CLI exits nonzero and gates block dependent stages |
 
-## Stage 9: data quality, logging and health
+Checks cover nonblank unique keys, finite nonnegative citations, valid years, bridge integrity, raw/provenance count agreement and analytical KPI reconciliation. Coverage warnings are informational, not a claim of representative sampling. The standalone checker evaluates the warehouse; raw checks run when the orchestrator selects files for ingestion.
 
-```powershell
-python -m scripts.check_data_quality
-python -m scripts.check_data_quality --database data/warehouse/research_trends.duckdb
-python -m scripts.run_pipeline --rebuild-downstream --skip-visualizations
-python -m scripts.pipeline_status
-python -m unittest discover -s tests -v
+`pipeline_status` reports recent runs, duration, last success and its age, pending files/builds, latest quality scope, paper volumes and represented years. A recent no-op success is **not evidence of fresh OpenAlex extraction**; no freshness SLA is imposed. `logs/pipeline.log` rotates at 2 MB with three backups and records stages, counts, hashes and timings. Logs are ignored; normal failure handling uses safe summaries and credential redaction. See [state and recovery details](docs/architecture.md).
+
+## Dashboard and visualizations
+
+Launch with `streamlit run dashboard/app.py`. The dashboard reads analytical views using short-lived read-only connections, bounded queries, parameterized filters and a 30-second data cache. It uses `curated.paper_topics` only for topic-membership filtering without row fan-out.
+
+| Page | Exploration |
+| --- | --- |
+| Overview | KPIs, publications, top topics and OA distribution |
+| Research Trends | Yearly counts, available growth and up to five topic series |
+| Topic Intelligence | Selected-topic metrics, history and its top 20 cited papers |
+| Paper Explorer | Year, associated topic, minimum citations, OA status, citation/year/title sorting and 10–200 rows |
+| Authors & Institutions | Rankings and tables with top-5 to top-30 controls |
+
+Coverage warnings stay visible. Missing data and one-year samples produce explanatory messages. Filters are page-local; they do not redefine global KPIs.
+
+Matplotlib exports nine possible PNG types: publication counts, YoY growth, top topics, topic time series, citation distribution, top cited papers, OA distribution, top authors and top institutions. Unsupported charts are skipped; stale batch files for those charts are removed. The citation histogram uses log-spaced `log(1 + citations)` bins with original-unit labels, retaining zero counts and showing mean/median. Ranked charts default to top 10; topic series are capped at five.
+
+Generated figures live in ignored `outputs/figures/`; the dashboard renders figures in memory. No sample screenshots are versioned. To add presentation images later, manually choose a reviewed screenshot, label its extraction date and bounded coverage, and place it in a dedicated documentation assets directory. Do not commit the generated output directory.
+
+## Technology and repository layout
+
+| Technology | Role |
+| --- | --- |
+| Python, requests, python-dotenv | Pipeline/application code, HTTP extraction and local environment configuration |
+| OpenAlex | Scholarly metadata source |
+| dlt with DuckDB destination | Inference, nested normalization, loading and Work-ID merge semantics |
+| DuckDB and SQL | Embedded warehouse, transactional curated builds and analytical views |
+| Pandas | Small analytical results passed to presentation code |
+| Matplotlib / Streamlit | Static chart export / interactive exploration |
+| unittest / Ruff | Offline automated validation / development correctness linting |
+
+```text
+README.md                 # Setup, usage, methodology and project overview
+docs/                     # Architecture, data model and demo guide
+src/                      # Extraction, load, transforms, quality, orchestration,
+                          # visualization, shared config/logging and benchmark
+scripts/                  # Command-line entry points
+dashboard/              # Streamlit app, data access, components and views
+sql/curated/              # Seven entity/bridge transformations
+sql/analytics/            # Eight analytical view definitions
+tests/                    # Offline unittest fixtures and integration checks
+.env.example              # Credential placeholder; local .env is ignored
+requirements.txt          # Runtime dependencies
+requirements-dev.txt      # Runtime dependencies plus Ruff
+pyproject.toml            # Ruff configuration
+data/raw/openalex/        # Generated/ignored JSONL and provenance
+data/warehouse/           # Generated/ignored DuckDB and dlt working state
+outputs/                  # Generated/ignored figures and local diagnostics
+logs/                     # Generated/ignored rotating application logs
 ```
 
-Quality is a separate assessment of the data: pipeline success means the
-requested processing finished, while a successful run can still have quality
-warnings. No heavy quality framework or new dependency is added. The existing
-unittest suite remains in use.
+## Design decisions and limitations
 
-- **PASS:** the check's stated condition holds.
-- **WARN:** optional source sparsity or insufficient temporal coverage; processing
-  continues and the CLI exits zero if no FAIL exists.
-- **FAIL:** malformed input, inconsistent extraction metadata, missing required
-  schema, broken identity/references, or invalid analytical metrics. The quality
-  CLI exits nonzero and orchestrated gates stop dependent work.
+OpenAlex provides linked scholarly entities. JSONL keeps selected source records replayable and streamable; dlt owns nested normalization and merge behavior. DuckDB supports a local analytical workflow without a database service. SQL makes grains and measures reviewable; bridges preserve many-to-many relationships. Merge avoids duplicate Works on replay, separate analytics views centralize metrics, and a separate dashboard keeps refreshes explicit. File hashes detect local changes without requiring premium source synchronization.
 
-Raw quality reuses the Stage 3 streaming reader. Every Work must have a nonblank
-string `id`; JSON must be valid and a completed file must contain records.
-Available legacy/new metadata record counts must match the file; source/cap
-counts must be nonnegative integers at least as large as extracted volume.
-`is_complete_extraction=true` requires a known matching source count. Missing
-optional provenance fields remain compatible. Raw checks run for files selected
-for ingestion, including force runs, and their results are saved before loading.
-The standalone quality CLI checks the current curated/analytics warehouse.
+Source metadata and topic classifications determine analytical coverage. Older papers have had longer to receive citations; full-count entity rankings overlap. Replaying older files can overwrite newer metadata, and omitted papers do not imply deletion. Runtime dependencies are not locked. This local application has no distributed execution, automatic scheduler, cloud deployment, ML, embeddings, semantic search, RAG or recommendation engine.
 
-The seven curated tables require their business-key columns. Paper/entity keys
-and bridge pairs must be nonblank and unique, and every bridge endpoint must
-resolve. Citations must be finite and nonnegative when present; publication years
-must fall within the existing 1500–current-year-plus-one scholarly range.
-The transactional curated builder shares these exact checks with the quality
-runner. Builder failures preserve the previously committed tables, and their
-quality results are persisted after rollback by the orchestrator.
-
-DOI, title, primary topic, authors, institutions, OA and source information remain
-optional. Coverage reports DOI, title, identified primary topic, identified
-authors, institution affiliations and known OA information as percentages of
-curated papers. Zero/partial coverage produces WARN, not FAIL; 100% produces
-PASS. This is an informational completeness comparison, not a minimum acceptance
-threshold. An empty dataset has unavailable percentages. Unknown/closed OA are
-not interchangeable: explicit closed/false is known information. Fewer than two
-distinct known publication years yields WARN, with no growth claim.
-
-Analytics checks query the expected views (allowing schema-dependent optional
-views to be absent), verify a single overview row, and reject negative/nonfinite
-citation metrics and duplicate analytical entity rows. They reuse Stage 5's
-validator for overview/curated count reconciliation, yearly counts, percentage
-bounds, per-topic/author/institution distinct-paper grain, and deterministic
-ranking. Growth percentages are intentionally exempt from the 0–100 share range.
-
-The orchestrated order is raw quality → ingestion → curated → curated quality
-gate → analytics → analytics quality gate → optional visualizations. Severe
-builder/gate failures are persisted and stop downstream stages; coverage warnings
-continue. Dirty flags remain set so a corrected run can resume. Unchanged,
-fully completed runs remain no-ops; use the standalone checker or
-`--rebuild-downstream` to reassess a warehouse changed outside the orchestrator.
-Charts and dashboard rendering are not upstream quality gates.
-
-`ops.data_quality_results` stores an execution UUID, optional pipeline run UUID,
-check name/layer/status, aggregate observed value, expected condition, safe
-details and timestamp. Each check batch is inserted transactionally; history is
-retained without storing raw records or API credentials. Standalone checking
-writes only this ops history, so close other warehouse users first. It does not
-create a missing warehouse. No freshness/history is invented for older datasets.
-
-The pipeline and quality CLIs configure Python logging with timestamped console
-output plus rotating `logs/pipeline.log` (2 MB, three backups). Reusable stage
-functions emit log messages without configuring global application logging.
-Logs include run IDs, stage/check names, record counts, file hashes, durations
-and failure summaries. The file hash identifies a load without logging record
-contents. The formatter redacts the configured OpenAlex key and common credential
-query parameters; arbitrary exception strings and stack traces are not emitted
-by normal pipeline failure handling. Logs and lock files remain Git-ignored.
-
-Stage durations and total elapsed run duration are logged. Status inspection
-shows recent runs with start/end and duration seconds, last success and its age,
-file counts, pending work, latest quality scope and PASS/WARN/FAIL counts, Works
-and curated paper volumes, and the represented year range/distinct count.
-For a pipeline quality execution, counts cover that entire run; standalone
-counts cover that check execution. Quality timestamps are shown separately from
-pipeline freshness. Freshness is informational, with no arbitrary SLA. A recent
-no-op success does not imply that OpenAlex was freshly extracted.
-
-The Stage 9 tests cover result semantics, optional coverage calculations,
-persisted failures, raw metadata mismatches, missing IDs, duplicate papers,
-orphan links, negative citations, corrupt analytics, logging/redaction and
-blocking gates. A three-Work end-to-end fixture exercises raw → dlt → curated →
-quality → analytics, including shared authors/institutions, multiple topics,
-two publication years and missing optional fields. All destructive tests use
-temporary databases. No live API is needed.
-
-## Stage 10: configuration and development tools
-
-`src/config.py` supplies absolute defaults anchored to the repository root:
-`RAW_DIRECTORY` (`data/raw/openalex`), `DEFAULT_DATABASE`
-(`data/warehouse/research_trends.duckdb`), `DEFAULT_OUTPUT` (`outputs/figures`),
-and `LOG_DIRECTORY` (`logs`). `PROJECT_ROOT` is derived from the module location.
-Explicit relative path overrides remain relative to the caller's working
-directory; `~` is expanded by reusable path helpers. The dashboard retains its
-`RESEARCH_WAREHOUSE_PATH` override. API credentials remain environment-based.
-
-Every database CLI accepts the preferred `--db-path` and the existing
-`--database` alias. Existing documented commands remain valid. Stage 1 now
-supports `--help` without creating a client or making an API request. Canonical
-`python -m scripts...` commands still run from the repository root. To use them
-elsewhere, the repository must be on Python's import path (for example through
-`PYTHONPATH`); path centralization does not install the package automatically.
-
-The project is validated with **Python 3.13.4 on Windows**, including paths
-containing spaces and Unicode. Ruff targets Python 3.11 syntax, consistent with
-the existing `hashlib.file_digest` requirement; other interpreters have not been
-validated by this stage. The `requirements.txt` install workflow is unchanged.
-All six runtime dependencies remain necessary; Ruff is development-only:
+## Development and validation
 
 ```powershell
 python -m pip install -r requirements-dev.txt
-python -m ruff check src scripts dashboard tests
 python -m unittest discover -s tests -v
+python -m ruff check src scripts dashboard tests
+python -m compileall -q src scripts dashboard tests
+python -m pip check
 python -m scripts.benchmark_pipeline
 python -m scripts.benchmark_pipeline --db-path data/warehouse/research_trends.duckdb --explain
 ```
 
-Ruff's `F` and `E9` rules check undefined names, unused code and syntax/correctness
-issues. No formatter or broad ignore rules are enabled, avoiding unrelated
-formatting churn. Runtime dependencies were neither added nor removed.
+The suite uses mocked HTTP and temporary real DuckDB/dlt fixtures, including replay, merge, rollback, failure recovery, quality gates, metric semantics, plotting and all dashboard pages. It does not call OpenAlex. Ruff enables `F` and `E9`; there is no pytest dependency or CI workflow.
 
-Reusable extraction is now in `src/extract/extraction.py`; the CLI handles
-arguments and safe failure messages. `src/load/files.py` shares completed-file
-discovery, fingerprints and normalized file identity between loading and
-orchestration. `src/transform/schema.py` holds the schema contract without
-depending on stage builders, removing the curated/quality schema import cycle.
-Analytical quality checks live separately in `src/quality/analytics.py`, so
-curated validation does not import its downstream analytics builder.
-`src/orchestration/status.py` provides the health report without importing the
-pipeline runner. Public boundary functions have targeted type hints. Existing
-stage imports of default constants remain compatible.
-
-Dashboard view reads now select an explicit set of user-facing columns while
-preserving optional fields, SQL filters, bounded limits and deterministic ID
-tie-breakers. Diagnostic status lists also break timestamp ties deterministically.
-DuckDB connections remain short-lived/context-managed, with read-only dashboard
-access and no shared global connection. Transactional rollback and top-level
-safe failure reporting remain in place; extraction preserves original exception
-context without exposing credential-bearing request text.
-
-The benchmark holds a read lock while copying the database and any WAL to a
-temporary directory, then runs existing curated, analytics and quality functions
-on that copy. It never rebuilds the source warehouse. Close other writers before
-benchmarking. It reports one timing per build/check and the median of three warm
-query executions after a warm-up. Optional-field queries are skipped if their
-fields are absent; timings include result fetching but exclude copy time. The
-`--explain` option prints actual DuckDB EXPLAIN ANALYZE plans for topic, paper,
-filtered-paper, author and institution queries. Temporary copies are removed
-automatically. These small-dataset measurements are diagnostics, not load tests.
-
-Inspection of the current 250-paper plans showed bounded top-N operations,
-distinct/hash aggregation and semi-joins for topic membership. No additional
-database optimization was warranted at the current dataset size. No indexes or
-materialized duplicates were added, and no analytical semantics were changed.
-Stage 11's final documentation deliverables are not included.
+The benchmark requires an existing ingestion warehouse. It copies the database and any WAL under a read lock, runs builds/checks on the temporary copy, and reports median timings from three warm query executions after a warm-up. `--explain` emits DuckDB execution plans. Close source writers first. These measurements are local diagnostics, not evidence of production scale.
