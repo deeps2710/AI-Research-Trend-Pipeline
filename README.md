@@ -35,7 +35,7 @@ Extraction is a separate command; the orchestrator starts with completed local f
 | Analytics | `analytics`: SQL views over curated data, shared by charts and dashboard |
 | Operations | `ops`: pipeline runs, processed-file fingerprints, pending state and quality history |
 
-See [architecture and recovery](docs/architecture.md), [data model and metric definitions](docs/data_model.md), and the [5–8 minute demo](docs/demo.md).
+See [architecture and recovery](docs/architecture.md), [data model and metric definitions](docs/data_model.md), the [5–8 minute demo](docs/demo.md), and [v1.0.0 validation and handoff](docs/release-v1.md).
 
 ## Coverage and methodology
 
