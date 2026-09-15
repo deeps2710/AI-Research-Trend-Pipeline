@@ -9,7 +9,7 @@ from src.logging_config import configure_logging
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--database', type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument('--db-path', '--database', dest='database', type=Path, default=DEFAULT_DATABASE)
     parser.add_argument('--raw-directory', type=Path, default=RAW_DIRECTORY)
     parser.add_argument('--output-dir', type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument('--force', action='store_true')

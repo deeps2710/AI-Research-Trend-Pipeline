@@ -1,6 +1,5 @@
 """Fingerprint completed extractions and coordinate the existing stages."""
 from contextlib import contextmanager
-import hashlib
 import logging
 import os
 from pathlib import Path
@@ -26,27 +25,10 @@ def quality_gate(database, layer, run_id):
     _, results = run_quality(database, (layer,), run_id)
     enforce(results)
 
-ROOT = Path(__file__).resolve().parents[2]
+from src.config import PathLike, resolve_path
 
 
-def fingerprint(path):
-    with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-
-def file_key(path):
-    resolved = Path(path).resolve()
-    try:
-        return resolved.relative_to(ROOT).as_posix()
-    except ValueError:
-        return resolved.as_posix()
-
-
-def discover(raw_directory):
-    # Stage 2 publishes the final sidecar last, as its completion marker.
-    return sorted((p.resolve() for p in Path(raw_directory).glob('*.jsonl')
-                   if p.is_file() and p.with_suffix('.metadata.json').is_file()),
-                  key=lambda p: p.as_posix())
+from src.load.files import fingerprint as fingerprint, file_key as file_key, discover as discover
 
 
 @contextmanager
@@ -101,9 +83,9 @@ def initialize(database):
             WHERE status='running';""")
 
 
-def run_pipeline(database=DEFAULT_DATABASE, raw_directory=RAW_DIRECTORY, *, force=False,
-                 rebuild_downstream=False, skip_visualizations=False, output_dir=DEFAULT_OUTPUT):
-    database = Path(database).resolve()
+def run_pipeline(database: PathLike = DEFAULT_DATABASE, raw_directory: PathLike = RAW_DIRECTORY, *, force: bool = False,
+                 rebuild_downstream: bool = False, skip_visualizations: bool = False, output_dir: PathLike = DEFAULT_OUTPUT) -> str:
+    database = resolve_path(database)
     database.parent.mkdir(parents=True, exist_ok=True)
     with run_lock(database):
         initialize(database)

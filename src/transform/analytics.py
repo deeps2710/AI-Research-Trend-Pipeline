@@ -1,6 +1,5 @@
 """Build and validate analytical views without copying curated records."""
 
-from pathlib import Path
 
 import logging
 
@@ -8,9 +7,11 @@ LOGGER = logging.getLogger("research_pipeline")
 
 import duckdb
 
-from src.transform.curated import DEFAULT_DATABASE, TABLE_KEYS, columns, validate_curated
+from src.config import DEFAULT_DATABASE as DEFAULT_DATABASE, PROJECT_ROOT, PathLike, resolve_path
+from src.transform.schema import TABLE_KEYS, columns
+from src.transform.curated import validate_curated
 
-SQL_DIRECTORY = Path(__file__).resolve().parents[2] / "sql" / "analytics"
+SQL_DIRECTORY = PROJECT_ROOT / "sql" / "analytics"
 VIEW_NAMES = (
     "overview_kpis", "publication_trends", "topic_summary", "topic_yearly_trends",
     "top_papers", "author_summary", "institution_summary", "open_access_summary",
@@ -101,8 +102,8 @@ def validate_analytics(connection, views):
             raise AnalyticsError("Top-paper ranking is not deterministic")
 
 
-def build_analytics(database_path=DEFAULT_DATABASE):
-    path = Path(database_path).resolve()
+def build_analytics(database_path: PathLike = DEFAULT_DATABASE) -> tuple[list[str], dict]:
+    path = resolve_path(database_path)
     if not path.is_file():
         raise AnalyticsError(f"Warehouse absent: {path}. Build Stage 4 first.")
     if path.stem.casefold() in {"analytics", "curated"}:

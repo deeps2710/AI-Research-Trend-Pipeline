@@ -1,14 +1,12 @@
 """Central, non-secret dashboard configuration."""
 import os
 from pathlib import Path
+from src.config import DEFAULT_DATABASE, PROJECT_ROOT as PROJECT_ROOT, resolve_path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def database_path():
-    return Path(os.getenv("RESEARCH_WAREHOUSE_PATH", str(
-        PROJECT_ROOT / "data/warehouse/research_trends.duckdb"
-    ))).expanduser().resolve()
+def database_path() -> Path:
+    return resolve_path(os.getenv("RESEARCH_WAREHOUSE_PATH", str(DEFAULT_DATABASE)))
 
 
 COVERAGE = (

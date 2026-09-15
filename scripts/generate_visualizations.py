@@ -11,7 +11,7 @@ from src.visualization.generate import DEFAULT_DATABASE, DEFAULT_OUTPUT, generat
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db-path", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument("--db-path", "--database", dest="db_path", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--top-n", type=int, choices=range(1, 31), default=10, metavar="1-30")
     args = parser.parse_args(argv)

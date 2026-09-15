@@ -9,10 +9,10 @@ LOGGER = logging.getLogger("research_pipeline")
 import duckdb
 import pandas as pd
 
-from src.transform.curated import DEFAULT_DATABASE, columns
+from src.config import DEFAULT_DATABASE as DEFAULT_DATABASE, DEFAULT_OUTPUT as DEFAULT_OUTPUT, PathLike, resolve_path
+from src.transform.schema import columns
 from src.visualization import charts
 
-DEFAULT_OUTPUT = Path("outputs/figures")
 JOBS = (
     ("publications_over_time", "publication_trends", charts.plot_publication_trends),
     ("year_over_year_growth", "publication_trends", charts.plot_year_over_year_growth),
@@ -26,10 +26,10 @@ JOBS = (
 )
 
 
-def generate_visualizations(db_path=DEFAULT_DATABASE, output_dir=DEFAULT_OUTPUT, top_n=10):
+def generate_visualizations(db_path: PathLike = DEFAULT_DATABASE, output_dir: PathLike = DEFAULT_OUTPUT, top_n: int = 10) -> tuple[list[Path], list[str]]:
     if type(top_n) is not int or not 1 <= top_n <= 30:
         raise ValueError("top_n must be an integer between 1 and 30")
-    database = Path(db_path).resolve()
+    database = resolve_path(db_path)
     if not database.is_file():
         raise FileNotFoundError("Warehouse absent; run Stages 3–5 first")
     output = Path(output_dir)

@@ -1,13 +1,14 @@
 """Streaming local JSONL ingestion through dlt's DuckDB destination."""
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import dlt
+from src.load.files import discover
 
 
-DEFAULT_DATABASE = Path("data/warehouse/research_trends.duckdb")
-RAW_DIRECTORY = Path("data/raw/openalex")
+from src.config import DEFAULT_DATABASE as DEFAULT_DATABASE, RAW_DIRECTORY as RAW_DIRECTORY, PathLike, resolve_path
 DATASET_NAME = "openalex_data"
 PIPELINE_NAME = "openalex_pipeline"
 
@@ -19,16 +20,13 @@ class InvalidWorkFile(ValueError):
 def resolve_input(input_file=None, raw_directory=RAW_DIRECTORY) -> Path:
     """Find an explicit JSONL or the newest completed Stage 2 extraction."""
     if input_file is None:
-        candidates = [
-            path for path in Path(raw_directory).glob("*.jsonl")
-            if path.is_file() and path.with_suffix(".metadata.json").is_file()
-        ]
+        candidates = discover(raw_directory)
         if not candidates:
             raise FileNotFoundError(
                 f"No completed JSONL extraction in {raw_directory}; run Stage 2 first."
             )
         input_file = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
-    path = Path(input_file).resolve()
+    path = resolve_path(input_file)
     if path.suffix.lower() != ".jsonl":
         raise InvalidWorkFile("Input must be a .jsonl file, not a metadata sidecar.")
     if not path.is_file():
@@ -36,7 +34,7 @@ def resolve_input(input_file=None, raw_directory=RAW_DIRECTORY) -> Path:
     return path
 
 
-def read_jsonl(input_file):
+def read_jsonl(input_file: PathLike) -> Iterator[dict]:
     """Yield validated dictionaries one line at a time; never flatten records."""
     path = Path(input_file)
     with path.open(encoding="utf-8") as stream:
@@ -69,8 +67,8 @@ def openalex_source(input_file):
     return works(input_file)
 
 
-def create_pipeline(database_path=DEFAULT_DATABASE):
-    database_path = Path(database_path).resolve()
+def create_pipeline(database_path: PathLike = DEFAULT_DATABASE):
+    database_path = resolve_path(database_path)
     if database_path.stem.casefold() == DATASET_NAME.casefold():
         raise ValueError(f"Database filename must differ from dataset {DATASET_NAME}")
     database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +83,7 @@ def create_pipeline(database_path=DEFAULT_DATABASE):
     )
 
 
-def load_file(input_file, database_path=DEFAULT_DATABASE):
+def load_file(input_file: PathLike, database_path: PathLike = DEFAULT_DATABASE):
     """Load raw Works; dlt owns schema inference and nested merge behavior."""
     input_file = resolve_input(input_file)
     pipeline = create_pipeline(database_path)

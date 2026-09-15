@@ -8,7 +8,7 @@ from src.transform.curated import DEFAULT_DATABASE, TABLE_KEYS
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument("--db-path", "--database", dest="database", type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args(argv)
     if not args.database.is_file():
         print("Warehouse absent; run Stage 3 first.", file=sys.stderr)
@@ -19,7 +19,7 @@ def main(argv=None):
             for table in TABLE_KEYS:
                 count = connection.execute(f"SELECT count(*) FROM curated.{table}").fetchone()[0]
                 print(f"\n{table}: {count} rows")
-                result = connection.execute(f"SELECT * FROM curated.{table} ORDER BY 1 LIMIT 3")
+                result = connection.execute(f"SELECT * FROM curated.{table} ORDER BY {', '.join(TABLE_KEYS[table])} LIMIT 3")
                 print([column[0] for column in result.description])
                 for row in result.fetchall():
                     print(row)

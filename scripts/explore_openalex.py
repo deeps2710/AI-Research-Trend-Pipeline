@@ -1,6 +1,7 @@
 """Run from the repository root: python -m scripts.explore_openalex."""
 
 import sys
+import argparse
 
 import requests
 
@@ -29,7 +30,8 @@ def print_summary(payload: dict) -> None:
         print(f"   Primary topic: {topic.get('display_name') or 'Unknown'}")
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    argparse.ArgumentParser(description=__doc__).parse_args(argv if argv is not None else [])
     client = OpenAlexClient()
     try:
         payload = client.fetch_works(
@@ -57,4 +59,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

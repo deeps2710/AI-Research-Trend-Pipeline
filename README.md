@@ -3,7 +3,7 @@
 A B.Tech Data Engineering project intended to collect scholarly metadata,
 track AI research trends, and help explore research papers using OpenAlex.
 
-## Current status: Stage 9 — data quality and pipeline observability
+## Current status: Stage 10 — configuration and engineering polish
 
 The current flow is **OpenAlex → Raw JSONL → dlt → DuckDB**. Stage 2 provides
 bounded cursor pagination, retries, raw JSONL, and provenance sidecars.
@@ -16,6 +16,7 @@ Stage 6 reads those views into Pandas and saves static Matplotlib charts.
 Stage 7 adds a read-only Streamlit dashboard over the same warehouse.
 Stage 8 coordinates local incremental raw-file processing and downstream builds.
 Stage 9 adds persisted quality checks, blocking integrity gates, logs, and health reporting.
+Stage 10 centralizes paths, preserves CLI aliases, and adds local lint/benchmark tooling.
 
 Stage 1 establishes the Python project and retrieves one page of Machine
 Learning works published in **2025**. The exploration script displays the
@@ -783,4 +784,74 @@ orphan links, negative citations, corrupt analytics, logging/redaction and
 blocking gates. A three-Work end-to-end fixture exercises raw → dlt → curated →
 quality → analytics, including shared authors/institutions, multiple topics,
 two publication years and missing optional fields. All destructive tests use
-temporary databases. No live API is needed, and no Stage 10 work is included.
+temporary databases. No live API is needed.
+
+## Stage 10: configuration and development tools
+
+`src/config.py` supplies absolute defaults anchored to the repository root:
+`RAW_DIRECTORY` (`data/raw/openalex`), `DEFAULT_DATABASE`
+(`data/warehouse/research_trends.duckdb`), `DEFAULT_OUTPUT` (`outputs/figures`),
+and `LOG_DIRECTORY` (`logs`). `PROJECT_ROOT` is derived from the module location.
+Explicit relative path overrides remain relative to the caller's working
+directory; `~` is expanded by reusable path helpers. The dashboard retains its
+`RESEARCH_WAREHOUSE_PATH` override. API credentials remain environment-based.
+
+Every database CLI accepts the preferred `--db-path` and the existing
+`--database` alias. Existing documented commands remain valid. Stage 1 now
+supports `--help` without creating a client or making an API request. Canonical
+`python -m scripts...` commands still run from the repository root. To use them
+elsewhere, the repository must be on Python's import path (for example through
+`PYTHONPATH`); path centralization does not install the package automatically.
+
+The project is validated with **Python 3.13.4 on Windows**, including paths
+containing spaces and Unicode. Ruff targets Python 3.11 syntax, consistent with
+the existing `hashlib.file_digest` requirement; other interpreters have not been
+validated by this stage. The `requirements.txt` install workflow is unchanged.
+All six runtime dependencies remain necessary; Ruff is development-only:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m ruff check src scripts dashboard tests
+python -m unittest discover -s tests -v
+python -m scripts.benchmark_pipeline
+python -m scripts.benchmark_pipeline --db-path data/warehouse/research_trends.duckdb --explain
+```
+
+Ruff's `F` and `E9` rules check undefined names, unused code and syntax/correctness
+issues. No formatter or broad ignore rules are enabled, avoiding unrelated
+formatting churn. Runtime dependencies were neither added nor removed.
+
+Reusable extraction is now in `src/extract/extraction.py`; the CLI handles
+arguments and safe failure messages. `src/load/files.py` shares completed-file
+discovery, fingerprints and normalized file identity between loading and
+orchestration. `src/transform/schema.py` holds the schema contract without
+depending on stage builders, removing the curated/quality schema import cycle.
+Analytical quality checks live separately in `src/quality/analytics.py`, so
+curated validation does not import its downstream analytics builder.
+`src/orchestration/status.py` provides the health report without importing the
+pipeline runner. Public boundary functions have targeted type hints. Existing
+stage imports of default constants remain compatible.
+
+Dashboard view reads now select an explicit set of user-facing columns while
+preserving optional fields, SQL filters, bounded limits and deterministic ID
+tie-breakers. Diagnostic status lists also break timestamp ties deterministically.
+DuckDB connections remain short-lived/context-managed, with read-only dashboard
+access and no shared global connection. Transactional rollback and top-level
+safe failure reporting remain in place; extraction preserves original exception
+context without exposing credential-bearing request text.
+
+The benchmark holds a read lock while copying the database and any WAL to a
+temporary directory, then runs existing curated, analytics and quality functions
+on that copy. It never rebuilds the source warehouse. Close other writers before
+benchmarking. It reports one timing per build/check and the median of three warm
+query executions after a warm-up. Optional-field queries are skipped if their
+fields are absent; timings include result fetching but exclude copy time. The
+`--explain` option prints actual DuckDB EXPLAIN ANALYZE plans for topic, paper,
+filtered-paper, author and institution queries. Temporary copies are removed
+automatically. These small-dataset measurements are diagnostics, not load tests.
+
+Inspection of the current 250-paper plans showed bounded top-N operations,
+distinct/hash aggregation and semi-joins for topic membership. No additional
+database optimization was warranted at the current dataset size. No indexes or
+materialized duplicates were added, and no analytical semantics were changed.
+Stage 11's final documentation deliverables are not included.

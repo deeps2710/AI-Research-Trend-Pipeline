@@ -4,6 +4,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+from src.config import LOG_DIRECTORY, PathLike
 
 
 class SafeFormatter(logging.Formatter):
@@ -15,8 +16,9 @@ class SafeFormatter(logging.Formatter):
         return re.sub(r'(?i)((?:api_key|access_token|password)=)[^\s&]+', r'\1[REDACTED]', text)
 
 
-def configure_logging(log_file=Path('logs/pipeline.log')):
+def configure_logging(log_file: PathLike = LOG_DIRECTORY / 'pipeline.log') -> logging.Logger:
     logger = logging.getLogger('research_pipeline')
+    logger.disabled = False
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
     for handler in logger.handlers[:]:
@@ -31,4 +33,10 @@ def configure_logging(log_file=Path('logs/pipeline.log')):
     handler = RotatingFileHandler(log_file, maxBytes=2_000_000, backupCount=3, encoding='utf-8')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    extraction = logging.getLogger('src.extract.openalex_client')
+    extraction.disabled = False
+    # Share the configured handlers directly; retain the established logger name.
+    extraction.handlers = logger.handlers[:]
+    extraction.setLevel(logging.DEBUG)
+    extraction.propagate = False
     return logger

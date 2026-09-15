@@ -10,7 +10,7 @@ from src.quality.models import Status
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--database', type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument('--db-path', '--database', dest='database', type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args(argv)
     try:
         configure_logging()

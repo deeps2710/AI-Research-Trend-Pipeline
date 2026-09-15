@@ -5,7 +5,7 @@ import os
 import re
 import time
 from collections.abc import Iterator
-from pathlib import Path
+from src.config import PROJECT_ROOT
 
 import requests
 from dotenv import load_dotenv
@@ -31,7 +31,7 @@ class OpenAlexClient:
     def __init__(self, max_retries: int = 3):
         if type(max_retries) is not int or max_retries < 0:
             raise ValueError("max_retries must be a non-negative integer")
-        load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+        load_dotenv(PROJECT_ROOT / ".env")
         self._api_key = os.getenv("OPENALEX_API_KEY", "").strip()
         # The example value is a placeholder, never a usable credential.
         if self._api_key == "your_openalex_api_key_here":

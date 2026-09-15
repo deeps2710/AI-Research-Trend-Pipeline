@@ -1,16 +1,17 @@
 """Execute checks and persist results separately from analytical data."""
 import logging
 from collections import Counter
-from pathlib import Path
 import uuid
 import duckdb
-from src.quality.checks import curated_checks, coverage_checks, analytics_checks
-from src.quality.models import Status, QualityError
+from src.quality.checks import curated_checks, coverage_checks
+from src.quality.analytics import analytics_checks
+from src.quality.models import Status, QualityError, Result
+from src.config import PathLike, resolve_path
 
 LOGGER = logging.getLogger('research_pipeline')
 
 
-def persist(database, results, run_id=None, execution_id=None):
+def persist(database: PathLike, results: list[Result], run_id: str | None = None, execution_id: str | None = None) -> str:
     execution_id = execution_id or str(uuid.uuid4())
     with duckdb.connect(str(database)) as con:
         con.execute("""CREATE SCHEMA IF NOT EXISTS ops;
@@ -32,13 +33,14 @@ def persist(database, results, run_id=None, execution_id=None):
     return execution_id
 
 
-def enforce(results):
+def enforce(results: list[Result]) -> None:
     if any(r.status == Status.FAIL for r in results):
         raise QualityError(results)
 
 
-def run_quality(database, layers=('curated','analytics'), run_id=None):
-    if not Path(database).is_file():
+def run_quality(database: PathLike, layers: tuple[str, ...] = ('curated','analytics'), run_id: str | None = None) -> tuple[str, list[Result]]:
+    database = resolve_path(database)
+    if not database.is_file():
         raise FileNotFoundError('Warehouse absent; build pipeline first')
     results = []
     with duckdb.connect(str(database), read_only=True) as con:

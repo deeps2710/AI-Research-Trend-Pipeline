@@ -22,3 +22,5 @@ data/warehouse/
 outputs/
 *.pipeline.lock
 logs/
+.ruff_cache/
+.streamlit/secrets.toml

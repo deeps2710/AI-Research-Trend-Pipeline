@@ -1,0 +1,7 @@
+[tool.ruff]
+target-version = "py311"
+extend-exclude = [".venv", "data", "outputs", "logs"]
+
+[tool.ruff.lint]
+# Correctness and unused-code checks without repository-wide formatting churn.
+select = ["F", "E9"]
